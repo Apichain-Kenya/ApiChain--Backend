@@ -13,9 +13,11 @@ class AggregatorLogin(BaseModel):
     password: str
 
 class AggregatorDetails(BaseModel):
-    address: Optional[str] = None 
-    longitude: float
-    latitude: float
+    address: Optional[str] = None
+    # FIX: Made lat/lon Optional — same reason as FarmerFarmDetails.
+    # Check with "is None" in the router, not truthiness (0.0 is a valid coordinate).
+    longitude: Optional[float] = None
+    latitude: Optional[float] = None
     farmers_count: int
 
 class AggregatorDocumentUpload(BaseModel):

@@ -5,7 +5,8 @@ from sqlalchemy.orm import Session
 from geoalchemy2.shape import from_shape
 from shapely.geometry import Point
 
-from app.database import SessionLocal
+# FIX: Import shared get_db from database.py instead of duplicating it here.
+from app.database import get_db
 from app.models.farmer import Farmer
 from app.models.document import Document
 from app.schemas.farmer import FarmerCreate, FarmerLogin, FarmerFarmDetails, FarmerDocumentUpload
@@ -15,13 +16,6 @@ router = APIRouter(prefix="/farmers", tags=["Farmers"])
 
 UPLOAD_DIR = "uploads/farmers"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 
@@ -50,7 +44,9 @@ def add_farm_details(farmer_id: int, data: FarmerFarmDetails, db: Session = Depe
     latitude = data.latitude
     longitude = data.longitude
 
-    if not latitude or not longitude:
+    # FIX: Use "is None" instead of truthiness check. 0.0 is a valid coordinate
+    # (equator/prime meridian) but "not 0.0" evaluates to True in Python.
+    if latitude is None or longitude is None:
         if not data.address:
             raise HTTPException(status_code=400, detail="Provide either latitude/longitude or an address")
         

@@ -17,6 +17,9 @@ class Aggregator(Base):
     # PostGIS location: center of operational region
     region_location = Column(Geography(geometry_type='POINT', srid=4326), nullable=True)
     farmers_count = Column(Integer, nullable=True)
+    # FIX: Added missing 'address' column. The router (routers/aggregator.py:65) sets
+    # agg.address = data.address, which throws AttributeError without this column.
+    address = Column(String, nullable=True)
 
     verification_status = Column(String, default="pending")
     documents = relationship("Document", back_populates="aggregator")
