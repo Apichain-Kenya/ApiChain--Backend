@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -u -m uvicorn app.main:app --reload --port 8000)",
-      "Bash(curl -s -I -X OPTIONS http://127.0.0.1:8000/ -H \"Origin: http://localhost:3000\")",
-      "Bash(curl:*)"
-    ]
-  }
-}
