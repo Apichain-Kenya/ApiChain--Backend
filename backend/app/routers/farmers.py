@@ -35,8 +35,30 @@ def register_farmer(data: FarmerCreate, db: Session = Depends(get_db)):
 
 
 
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from geoalchemy2.shape import from_shape
+from shapely.geometry import Point
+import requests
+
+from app.database import SessionLocal
+from app.models.farmer import Farmer
+from app.schemas.farmer import FarmerFarmDetails
+
+router = APIRouter(prefix="/farmers", tags=["Farmers"])
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 @router.post("/farm-details/{farmer_id}")
 def add_farm_details(farmer_id: int, data: FarmerFarmDetails, db: Session = Depends(get_db)):
+    
     farmer = db.query(Farmer).filter(Farmer.id == farmer_id).first()
     if not farmer:
         raise HTTPException(status_code=404, detail="Farmer not found")
@@ -48,35 +70,56 @@ def add_farm_details(farmer_id: int, data: FarmerFarmDetails, db: Session = Depe
     # (equator/prime meridian) but "not 0.0" evaluates to True in Python.
     if latitude is None or longitude is None:
         if not data.address:
-            raise HTTPException(status_code=400, detail="Provide either latitude/longitude or an address")
-        
-        # Geocode address using OpenStreetMap
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either latitude/longitude or an address"
+            )
+
+        # 🌍 Geocode address
         response = requests.get(
             "https://nominatim.openstreetmap.org/search",
             params={"q": data.address, "format": "json", "limit": 1},
             headers={"User-Agent": "AgriScanAI-App"}
         )
+
         results = response.json()
         if not results:
             raise HTTPException(status_code=404, detail="Address not found")
-        
+
         latitude = float(results[0]["lat"])
         longitude = float(results[0]["lon"])
 
-    # Update farmer data
+    # ✅ Save location (PostGIS)
     farmer.location = from_shape(Point(longitude, latitude), srid=4326)
+
+    # ✅ Core fields
     farmer.number_of_hives = data.number_of_hives
-    farmer.address = data.address  # <-- store the address
+    farmer.address = data.address
+
+    # ✅ NEW FIELDS (only update if provided)
+    if data.experience is not None:
+        farmer.experience = data.experience
+
+    if data.education is not None:
+        farmer.education = data.education
+
+    if data.feeding_practice is not None:
+        farmer.feeding_practice = data.feeding_practice
 
     db.commit()
+    db.refresh(farmer)
+
     return {
-        "message": "Farm details updated with geo-location",
+        "message": "Farm details updated successfully",
+        "farmer_id": farmer.id,
         "latitude": latitude,
         "longitude": longitude,
+        "number_of_hives": farmer.number_of_hives,
+        "experience": farmer.experience,
+        "education": farmer.education,
+        "feeding_practice": farmer.feeding_practice,
         "address": farmer.address
     }
-
-
 
 
 @router.post("/upload-document/{farmer_id}")

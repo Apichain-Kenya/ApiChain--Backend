@@ -23,5 +23,9 @@ class FarmerFarmDetails(BaseModel):
     latitude: Optional[float] = None
     number_of_hives: int
 
+    experience: Optional[int] = None
+    education: Optional[str] = None
+    feeding_practice: Optional[str] = None
+
 class FarmerDocumentUpload(BaseModel):
     doc_type: str 
