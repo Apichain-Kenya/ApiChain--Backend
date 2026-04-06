@@ -2,7 +2,8 @@ import os, shutil
 import requests
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
-from app.database import SessionLocal
+# FIX: Import shared get_db from database.py instead of duplicating it here.
+from app.database import get_db
 from app.models.aggregator import Aggregator
 from app.schemas.aggregator import AggregatorCreate, AggregatorLogin, AggregatorDetails
 from app.auth import hash_password, verify_password, create_access_token
@@ -11,13 +12,6 @@ from geoalchemy2.shape import from_shape
 from shapely.geometry import Point
 
 router = APIRouter(prefix="/aggregators", tags=["Aggregators"])
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 @router.post("/register")
@@ -43,7 +37,8 @@ def add_details(agg_id: int, data: AggregatorDetails, db: Session = Depends(get_
     longitude = data.longitude
 
     # If coordinates not provided, geocode the address
-    if not latitude or not longitude:
+    # FIX: Use "is None" — 0.0 is a valid coordinate but falsy in Python.
+    if latitude is None or longitude is None:
         if not data.address:
             raise HTTPException(status_code=400, detail="Provide either latitude/longitude or an address")
 
