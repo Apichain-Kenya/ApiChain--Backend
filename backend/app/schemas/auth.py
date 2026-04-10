@@ -2,5 +2,5 @@ from pydantic import BaseModel
 
 
 class LoginRequest(BaseModel):
-    phone: str
+    identifier: str 
     password: str

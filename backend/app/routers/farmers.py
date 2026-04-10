@@ -34,6 +34,7 @@ def create_farmer(
         first_name=data.first_name,
         last_name=data.last_name,
         phone=data.phone,
+        username=data.username,
         email=data.email,
         password=hash_password(data.password),
         onboarded_by=current_user.id 

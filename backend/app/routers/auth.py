@@ -1,9 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session # type: ignore
+from sqlalchemy import or_ # type: ignore
 from datetime import datetime, timedelta
 import random
-# FIX: Import shared get_db from database.py instead of duplicating it in every router.
-# Also removed duplicate 'from app.database import SessionLocal' that appeared twice.
 from app.database import get_db
 from app.models.farmer import Farmer
 from app.models.aggregator import Aggregator
@@ -14,23 +13,44 @@ from app.models.user import User
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
 
+
+
 @router.post("/login")
 def login(data: LoginRequest, db: Session = Depends(get_db)):
 
-    from app.models.user import User
+    user = db.query(User).filter(
+        User.phone == data.identifier
+    ).first()
 
-    user = db.query(User).filter(User.phone == data.phone).first()
+    if user and verify_password(data.password, user.password):
+        token = create_access_token({
+            "sub": str(user.id),
+            "role": user.role
+        })
 
-    if not user or not verify_password(data.password, user.password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "role": user.role
+        }
 
-    token = create_access_token({
-        "sub": str(user.id),
-        "role": user.role
-    })
+    farmer = db.query(Farmer).filter(
+        or_(
+            Farmer.phone == data.identifier,
+            Farmer.username == data.identifier
+        )
+    ).first()
 
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "role": user.role
-    }
+    if farmer and verify_password(data.password, farmer.password):
+        token = create_access_token({
+            "sub": str(farmer.id),
+            "role": "farmer"
+        })
+
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "role": "farmer"
+        }
+
+    raise HTTPException(status_code=401, detail="Invalid credentials")

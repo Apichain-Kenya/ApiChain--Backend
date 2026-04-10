@@ -6,6 +6,7 @@ class FarmerCreate(BaseModel):
     first_name: str
     last_name: str
     phone: str
+    username: Optional[str] = None 
     email: Optional[EmailStr] = None
     password: str
 
