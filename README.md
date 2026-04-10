@@ -48,14 +48,7 @@ source .venv/bin/activate
 pip install -r backend/requirements.txt
 4. Set up environment variables
 
-Create a .env file inside backend/:
-
-DATABASE_URL=postgresql://username:password@localhost:5432/apichain
-SECRET_KEY=your_secret_key
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-
-
+Create a .env file inside backend/
 
 5. Set up the database
 
