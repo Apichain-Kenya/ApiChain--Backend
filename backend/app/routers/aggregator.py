@@ -14,19 +14,6 @@ from shapely.geometry import Point
 router = APIRouter(prefix="/aggregators", tags=["Aggregators"])
 
 
-@router.post("/register")
-def register_aggregator(data: AggregatorCreate, db: Session = Depends(get_db)):
-    agg = Aggregator(
-        business_name=data.business_name,
-        phone=data.phone,
-        email=data.email,
-        password=hash_password(data.password)
-    )
-    db.add(agg)
-    db.commit()
-    return {"message": "Aggregator registered. Proceed to OTP verification"}
-
-
 @router.post("/details/{agg_id}")
 def add_details(agg_id: int, data: AggregatorDetails, db: Session = Depends(get_db)):
     agg = db.query(Aggregator).filter(Aggregator.id == agg_id).first()

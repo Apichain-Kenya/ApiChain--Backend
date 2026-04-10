@@ -16,9 +16,6 @@ class FarmerLogin(BaseModel):
 
 class FarmerFarmDetails(BaseModel):
     address: Optional[str] = None
-    # FIX: Made lat/lon Optional so callers can omit them and provide an address instead.
-    # Previously required floats, and the router check "if not latitude" was wrong
-    # because 0.0 is falsy in Python (equator/prime meridian coordinates would fail).
     longitude: Optional[float] = None
     latitude: Optional[float] = None
     number_of_hives: int

@@ -9,7 +9,6 @@ This backend powers the core functionality for ApiChain, including farmer and ag
 The ApiChain backend enables:
 
 Farmer & Aggregator onboarding
-OTP-based authentication
 Geo-spatial farm data management (PostGIS)
 Document verification
 Honey traceability pipeline (Geo-AI + Blockchain integration)
@@ -18,7 +17,6 @@ It exposes a RESTful API to facilitate frontend integration and ensures traceabi
 
 Features
 Secure JWT-based authentication
-OTP verification for farmers and aggregators
 CRUD operations for farm and honey data
 Geo-spatial data handling with PostGIS
 Blockchain integration for traceability

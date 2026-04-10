@@ -1,11 +1,11 @@
 from datetime import datetime, timedelta
-from jose import JWTError, jwt
+from jose import JWTError, jwt # type: ignore
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session # type: ignore
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv # type: ignore
 
 from . import database
 

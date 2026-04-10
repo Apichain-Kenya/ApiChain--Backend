@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from app.database import Base
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
-from app.models import farmer, aggregator, otp, document
+from app.models import farmer, aggregator, document
 from geoalchemy2 import Geometry, Geography
 
 from alembic import context

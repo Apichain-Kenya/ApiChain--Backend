@@ -1,6 +1,6 @@
-from sqlalchemy import Column, Integer, String, Boolean
-from geoalchemy2 import Geography
-from sqlalchemy.orm import relationship
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey  # type: ignore
+from geoalchemy2 import Geography   # type: ignore
+from sqlalchemy.orm import relationship  # type: ignore
 from app.database import Base
 
 class Farmer(Base):
@@ -21,11 +21,11 @@ class Farmer(Base):
 
     number_of_hives = Column(Integer, nullable=True)
 
-    # ✅ NEW FIELDS
+
     experience = Column(Integer, nullable=True)
     education = Column(String, nullable=True)
     feeding_practice = Column(String, nullable=True)
 
     verification_status = Column(String, default="pending")
-
+    onboarded_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     documents = relationship("Document", back_populates="farmer")

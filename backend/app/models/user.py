@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, String, Boolean
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey  # type: ignore
+from sqlalchemy.orm import relationship # type: ignore                                                                                                 
 from app.database import Base
 
 class User(Base):
@@ -17,5 +18,7 @@ class User(Base):
 
     role = Column(String, nullable=False)  
     # super_admin, admin, onboarding_officer, etc
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    is_active = Column(Boolean, default=True) 
 
-    is_active = Column(Boolean, default=True)
+    creator = relationship("User", remote_side=[id])

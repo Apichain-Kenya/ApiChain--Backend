@@ -1,16 +1,18 @@
 import os
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-import requests
-from sqlalchemy.orm import Session
-from geoalchemy2.shape import from_shape
-from shapely.geometry import Point
+import requests # type: ignore
+from sqlalchemy.orm import Session # type: ignore
+from geoalchemy2.shape import from_shape # type: ignore                                                                 
+from shapely.geometry import Point #  type: ignore
 
 # FIX: Import shared get_db from database.py instead of duplicating it here.
 from app.database import get_db
+from app.models.user import User
 from app.models.farmer import Farmer
 from app.models.document import Document
 from app.schemas.farmer import FarmerCreate, FarmerLogin, FarmerFarmDetails, FarmerDocumentUpload
 from app.auth import hash_password, verify_password, create_access_token
+from app.deps import get_current_user
 
 router = APIRouter(prefix="/farmers", tags=["Farmers"])
 
@@ -18,22 +20,33 @@ UPLOAD_DIR = "uploads/farmers"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
+@router.post("/create-farmer")
+def create_farmer(
+    data: FarmerCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    
+    if current_user.role != "onboarding_officer":
+        raise HTTPException(status_code=403, detail="Only onboarding officers can create farmers")
 
-@router.post("/register")
-def register_farmer(data: FarmerCreate, db: Session = Depends(get_db)):
     farmer = Farmer(
         first_name=data.first_name,
         last_name=data.last_name,
         phone=data.phone,
         email=data.email,
-        password=hash_password(data.password)
+        password=hash_password(data.password),
+        onboarded_by=current_user.id 
     )
+
     db.add(farmer)
     db.commit()
     db.refresh(farmer)
-    return {"message": "Farmer registered. Proceed to OTP verification"}
 
-
+    return {
+        "message": "Farmer created successfully",
+        "farmer_id": farmer.id
+    }
 
 @router.post("/farm-details/{farmer_id}")
 def add_farm_details(farmer_id: int, data: FarmerFarmDetails, db: Session = Depends(get_db)):
@@ -54,7 +67,6 @@ def add_farm_details(farmer_id: int, data: FarmerFarmDetails, db: Session = Depe
                 detail="Provide either latitude/longitude or an address"
             )
 
-        # 🌍 Geocode address
         response = requests.get(
             "https://nominatim.openstreetmap.org/search",
             params={"q": data.address, "format": "json", "limit": 1},
@@ -68,14 +80,11 @@ def add_farm_details(farmer_id: int, data: FarmerFarmDetails, db: Session = Depe
         latitude = float(results[0]["lat"])
         longitude = float(results[0]["lon"])
 
-    # ✅ Save location (PostGIS)
     farmer.location = from_shape(Point(longitude, latitude), srid=4326)
 
-    # ✅ Core fields
     farmer.number_of_hives = data.number_of_hives
     farmer.address = data.address
 
-    # ✅ NEW FIELDS (only update if provided)
     if data.experience is not None:
         farmer.experience = data.experience
 

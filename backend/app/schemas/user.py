@@ -8,3 +8,12 @@ class SuperAdminCreate(BaseModel):
     email: EmailStr
     phone: str
     password: str
+
+class EmployeeCreate(BaseModel):
+    first_name: str
+    last_name: str
+    username: str
+    email: EmailStr
+    phone: str
+    password: str
+    role: str   

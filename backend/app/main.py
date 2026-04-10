@@ -1,8 +1,8 @@
 import os
-from dotenv import load_dotenv
+from fastapi.openapi.utils import get_openapi
+from fastapi.security import HTTPBearer
+from dotenv import load_dotenv # type: ignore
 from fastapi import FastAPI
-# FIX: Added CORS middleware so the frontend can make cross-origin API calls.
-# Without this, browsers block requests from a different origin (e.g. localhost:3000).
 from fastapi.middleware.cors import CORSMiddleware
 from app import database
 from app.routers import auth, farmers, aggregator, user
@@ -10,13 +10,8 @@ from app.routers import auth, farmers, aggregator, user
 load_dotenv()
 app = FastAPI()
 
-# CORS configuration:
-# Set FRONTEND_ORIGINS in .env as a comma-separated list of allowed origins.
-# e.g. FRONTEND_ORIGINS=http://localhost:3000,http://localhost:5173
-# When explicit origins are set, allow_credentials=True is safe (cookies/auth headers work).
-# When no origins are set (or the value parses to an empty list), fall back to
-# allow_origins=["*"] with allow_credentials=False
-# (wildcard + credentials is unsafe and rejected by browsers).
+security = HTTPBearer()
+
 _origins_env = os.getenv("FRONTEND_ORIGINS", "")
 _origins = [o.strip() for o in _origins_env.split(",") if o.strip()]
 if _origins:
@@ -41,3 +36,34 @@ app.include_router(auth.router)
 app.include_router(farmers.router)
 app.include_router(aggregator.router)
 app.include_router(user.router)
+
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    openapi_schema = get_openapi(
+        title="ApiChain API",
+        version="1.0.0",
+        description="API with JWT auth",
+        routes=app.routes,
+    )
+
+    openapi_schema["components"]["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT"
+        }
+    }
+
+    for path in openapi_schema["paths"]:
+        for method in openapi_schema["paths"][path]:
+            openapi_schema["paths"][path][method]["security"] = [
+                {"BearerAuth": []}
+            ]
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
