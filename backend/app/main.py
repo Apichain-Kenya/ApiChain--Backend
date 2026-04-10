@@ -5,7 +5,7 @@ from fastapi import FastAPI
 # Without this, browsers block requests from a different origin (e.g. localhost:3000).
 from fastapi.middleware.cors import CORSMiddleware
 from app import database
-from app.routers import auth, farmers, aggregator
+from app.routers import auth, farmers, aggregator, user
 
 load_dotenv()
 app = FastAPI()
@@ -40,3 +40,4 @@ def root():
 app.include_router(auth.router)
 app.include_router(farmers.router)
 app.include_router(aggregator.router)
+app.include_router(user.router)

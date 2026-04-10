@@ -11,6 +11,7 @@ from app.auth import verify_password, create_access_token
 from app.schemas.auth import LoginRequest
 from app.models.otp import OTP
 from app.schemas.otp import OTPVerify
+from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -66,18 +67,30 @@ def verify_otp(data: OTPVerify, db: Session = Depends(get_db)):
 
 @router.post("/login")
 def login(data: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(Farmer).filter(Farmer.phone == data.phone).first()
-    role = None
 
-    if user:
-        role = "farmer"
-    else:
-        user = db.query(Aggregator).filter(Aggregator.phone == data.phone).first()
-        if user:
-            role = "aggregator"
+    # 🔹 First check users table
+    user = db.query(User).filter(User.phone == data.phone).first()
 
-    if not user or not verify_password(data.password, user.password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+    if user and verify_password(data.password, user.password):
+        token = create_access_token({
+            "sub": str(user.id),
+            "role": user.role
+        })
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "role": user.role
+        }
 
-    token = create_access_token({"sub": str(user.id), "role": role})
-    return {"access_token": token, "token_type": "bearer", "role": role}
+    # 🔹 fallback (old system)
+    farmer = db.query(Farmer).filter(Farmer.phone == data.phone).first()
+    if farmer and verify_password(data.password, farmer.password):
+        token = create_access_token({"sub": str(farmer.id), "role": "farmer"})
+        return {"access_token": token, "token_type": "bearer", "role": "farmer"}
+
+    aggregator = db.query(Aggregator).filter(Aggregator.phone == data.phone).first()
+    if aggregator and verify_password(data.password, aggregator.password):
+        token = create_access_token({"sub": str(aggregator.id), "role": "aggregator"})
+        return {"access_token": token, "token_type": "bearer", "role": "aggregator"}
+
+    raise HTTPException(status_code=401, detail="Invalid credentials")

@@ -35,27 +35,6 @@ def register_farmer(data: FarmerCreate, db: Session = Depends(get_db)):
 
 
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from geoalchemy2.shape import from_shape
-from shapely.geometry import Point
-import requests
-
-from app.database import SessionLocal
-from app.models.farmer import Farmer
-from app.schemas.farmer import FarmerFarmDetails
-
-router = APIRouter(prefix="/farmers", tags=["Farmers"])
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 @router.post("/farm-details/{farmer_id}")
 def add_farm_details(farmer_id: int, data: FarmerFarmDetails, db: Session = Depends(get_db)):
     
