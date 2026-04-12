@@ -8,7 +8,7 @@ class EthWallet(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, nullable=False)
-    user_role = Column(String, nullable=False)  # "farmer" or "aggregator"
+    user_role = Column(String, nullable=False)  # employee role, e.g. "farmer", "harvest_processor", "packager", or "distributor"
     wallet_address = Column(String, unique=True, nullable=False, index=True)
     encrypted_key = Column(Text, nullable=False)
     blockchain_role = Column(String, nullable=True)  # "BEEKEEPER" or "PROCESSOR"
