@@ -197,6 +197,7 @@ class BlockchainService:
         if receipt["status"] != 1:
             raise Exception(
                 f"Transaction reverted: {tx_hash.hex()}"
+                # Consider including the operation type or additional context to make debugging easier.
             )
 
         return tx_hash.hex()

@@ -81,7 +81,23 @@ def create_user_wallet(
 
         # Fund the new wallet with ETH for gas (dev/testnet only)
         if blockchain_service.is_connected and blockchain_service.admin_key:
-            blockchain_service.fund_account(wallet_address)
+            funding_result = blockchain_service.fund_account(wallet_address)
+            if funding_result:
+                logger.info(
+                    f"Funded wallet {wallet_address} for user {user_id}: "
+                    f"{funding_result}"
+                )
+            else:
+                logger.warning(
+                    f"Funding failed or returned no result for wallet "
+                    f"{wallet_address} (user {user_id})"
+                )
+        else:
+            logger.info(
+                f"Skipping wallet funding for user {user_id} "
+                f"(wallet {wallet_address}): blockchain unavailable "
+                f"or admin key not configured"
+            )
 
     except Exception as e:
         logger.error(

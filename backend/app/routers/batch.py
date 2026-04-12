@@ -54,6 +54,7 @@ def _get_user_signing_key(db: Session, user_id: int, user_role: str) -> str:
         blockchain_service.fund_account(wallet.wallet_address)
         return key
     # Fallback for users registered before Stage 2
+    # Falling back to the admin key for users without wallets creates a security risk where all legacy users share the same signing key. This could lead to transaction attribution issues and security vulnerabilities. Consider requiring wallet migration or implementing a more secure fallback mechanism.
     return blockchain_service.admin_key
 
 
@@ -147,6 +148,7 @@ def record_harvest(
 
     harvest_payload = data.model_dump()
     harvest_hash = blockchain_service.compute_data_hash(harvest_payload)
+    # The hex string to bytes conversion logic is duplicated across multiple endpoints (lines 150, 200, 250, 298, 348, 416, 431, 449). Consider extracting this into a helper function to reduce duplication and improve maintainability.
     batch_id_bytes = bytes.fromhex(batch_id[2:]) if batch_id.startswith("0x") else bytes.fromhex(batch_id)
 
     try:

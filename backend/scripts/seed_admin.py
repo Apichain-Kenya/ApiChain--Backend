@@ -58,7 +58,7 @@ def seed_admin():
             user_id=0,
             user_role="admin",
             wallet_address=admin_address,
-            encrypted_key="DEPLOYER_KEY_IN_ENV",  # Admin key lives in .env, not encrypted in DB
+            encrypted_key="NOT_STORED",  # Admin key lives in .env and is not stored encrypted in DB
             blockchain_role="DEFAULT_ADMIN",
             role_granted=True,  # Already has role from deploy
             role_tx_hash=None,
