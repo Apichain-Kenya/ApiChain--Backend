@@ -27,6 +27,8 @@ class Farmer(Base):
     education = Column(String, nullable=True)
     feeding_practice = Column(String, nullable=True)
 
+    wallet_address = Column(String, unique=True, nullable=True)
+
     verification_status = Column(String, default="pending")
     onboarded_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     documents = relationship("Document", back_populates="farmer")

@@ -1,13 +1,16 @@
 import os
+from dotenv import load_dotenv  # type: ignore
+
+# CRITICAL: load_dotenv() MUST run before any app.routers imports.
+# Blockchain services read env vars (RPC URL, keys, addresses) at import time.
+load_dotenv()
+
 from fastapi.openapi.utils import get_openapi
 from fastapi.security import HTTPBearer
-from dotenv import load_dotenv # type: ignore
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app import database
-from app.routers import auth, farmers, aggregator, user
-
-load_dotenv()
+from app.routers import auth, farmers, aggregator, user, batch
 app = FastAPI()
 
 security = HTTPBearer()
@@ -36,6 +39,7 @@ app.include_router(auth.router)
 app.include_router(farmers.router)
 app.include_router(aggregator.router)
 app.include_router(user.router)
+app.include_router(batch.router)
 
 
 def custom_openapi():

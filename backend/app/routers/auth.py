@@ -19,7 +19,10 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 def login(data: LoginRequest, db: Session = Depends(get_db)):
 
     user = db.query(User).filter(
-        User.phone == data.identifier
+        or_(
+            User.phone == data.identifier,
+            User.username == data.identifier,
+        )
     ).first()
 
     if user and verify_password(data.password, user.password):

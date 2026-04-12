@@ -13,6 +13,11 @@ from app.models.document import Document
 from app.schemas.farmer import FarmerCreate, FarmerLogin, FarmerFarmDetails, FarmerDocumentUpload
 from app.auth import hash_password, verify_password, create_access_token
 from app.deps import get_current_user
+from app.services.wallet import create_user_wallet
+from app.services.roles import grant_blockchain_role_to_user
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/farmers", tags=["Farmers"])
 
@@ -24,11 +29,11 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 def create_farmer(
     data: FarmerCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
-    
-    if current_user.role != "onboarding_officer":
-        raise HTTPException(status_code=403, detail="Only onboarding officers can create farmers")
+
+    if current_user["role"] != "on_ground_officer":
+        raise HTTPException(status_code=403, detail="Only on-ground officers can create farmers")
 
     farmer = Farmer(
         first_name=data.first_name,
@@ -37,16 +42,31 @@ def create_farmer(
         username=data.username,
         email=data.email,
         password=hash_password(data.password),
-        onboarded_by=current_user.id 
+        onboarded_by=current_user["user_id"],
     )
 
     db.add(farmer)
+    db.flush()  # get farmer.id before wallet creation
+
+    # Blockchain: create wallet + grant BEEKEEPER role
+    wallet_address = create_user_wallet(db, farmer.id, "farmer")
+    if wallet_address:
+        farmer.wallet_address = wallet_address
+
     db.commit()
     db.refresh(farmer)
 
+    role_result = grant_blockchain_role_to_user(db, farmer.id, "farmer")
+    logger.info(
+        f"Farmer {farmer.id} created by officer {current_user['user_id']}. "
+        f"Wallet={wallet_address or 'N/A'}, Blockchain: {role_result['message']}"
+    )
+
     return {
         "message": "Farmer created successfully",
-        "farmer_id": farmer.id
+        "farmer_id": farmer.id,
+        "wallet_address": wallet_address,
+        "blockchain": role_result,
     }
 
 @router.post("/farm-details/{farmer_id}")

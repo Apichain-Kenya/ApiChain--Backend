@@ -16,3 +16,4 @@ shapely
 alembic
 twilio
 pydantic[email]
+web3
