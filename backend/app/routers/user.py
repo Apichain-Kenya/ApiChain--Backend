@@ -1,13 +1,17 @@
 import os
+import logging
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session # type: ignore
+from sqlalchemy.orm import Session  # type: ignore
 
 from app.database import get_db
 from app.models.user import User
-from app.schemas.user import SuperAdminCreate
+from app.schemas.user import SuperAdminCreate, EmployeeCreate
 from app.auth import hash_password
-from app.schemas.user import EmployeeCreate
 from app.deps import require_roles
+from app.services.wallet import create_user_wallet
+from app.services.roles import grant_blockchain_role_to_user
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -31,7 +35,6 @@ def create_super_admin(data: SuperAdminCreate, db: Session = Depends(get_db)):
     if db.query(User).filter(User.phone == data.phone).first():
         raise HTTPException(status_code=400, detail="Phone already in use")
 
-    # Create user
     user = User(
         first_name=data.firstName,
         last_name=data.lastName,
@@ -39,46 +42,47 @@ def create_super_admin(data: SuperAdminCreate, db: Session = Depends(get_db)):
         email=data.email,
         phone=data.phone,
         password=hash_password(data.password),
-        role="super_admin"
+        role="super_admin",
     )
 
     db.add(user)
     db.commit()
     db.refresh(user)
 
+    # Super admin uses the deployer key (DEFAULT_ADMIN_ROLE already granted
+    # at contract deployment). No personal wallet needed.
+    role_result = grant_blockchain_role_to_user(db, user.id, "super_admin")
+    logger.info(f"Super admin {user.id} created. Blockchain: {role_result['message']}")
+
     return {"message": "Super admin created successfully"}
 
-def require_admin(user_role: str):
-    if user_role not in ["admin", "super_admin"]:
-        raise HTTPException(status_code=403, detail="Not authorized")
-    
+
 @router.post("/create-employee")
 def create_employee(
     data: EmployeeCreate,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_roles(["super_admin", "admin"]))
+    current_user: dict = Depends(require_roles(["super_admin", "admin"])),
 ):
     """
-    Create system employees (admin-controlled endpoint)
+    Create system employees (admin-controlled endpoint).
+    Wallet + blockchain role are assigned automatically for applicable roles.
     """
 
-   
     allowed_roles = [
         "admin",
-        "onboarding_officer",
+        "on_ground_officer",
         "harvest_processor",
-        "tester_lab",
-        "packaging_distribution"
+        "lab_test_officer",
+        "packager",
+        "distributor",
     ]
 
-  
     if data.role not in allowed_roles:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid role. Allowed roles: {allowed_roles}"
+            detail=f"Invalid role. Allowed roles: {allowed_roles}",
         )
 
-   
     if db.query(User).filter(User.email == data.email).first():
         raise HTTPException(status_code=400, detail="Email already exists")
 
@@ -96,12 +100,23 @@ def create_employee(
         phone=data.phone,
         password=hash_password(data.password),
         role=data.role,
-        created_by=current_user.id 
+        created_by=current_user["user_id"],
     )
 
     db.add(user)
     db.commit()
     db.refresh(user)
+
+    # Blockchain: create wallet + grant role for applicable employee roles
+    wallet_address = create_user_wallet(db, user.id, data.role)
+    if wallet_address:
+        db.commit()
+
+    role_result = grant_blockchain_role_to_user(db, user.id, data.role)
+    logger.info(
+        f"Employee {user.id} (role={data.role}) created. "
+        f"Wallet={wallet_address or 'N/A'}, Blockchain: {role_result['message']}"
+    )
 
     return {
         "message": "Employee created successfully",
@@ -113,6 +128,8 @@ def create_employee(
             "email": user.email,
             "phone": user.phone,
             "role": user.role,
-            "created_by": user.created_by
-        }
+            "created_by": user.created_by,
+        },
+        "wallet_address": wallet_address,
+        "blockchain": role_result,
     }
