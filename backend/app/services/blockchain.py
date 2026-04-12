@@ -285,6 +285,11 @@ class BlockchainService:
 
     def anchor_lab_proof(self, batch_id: bytes, proof_hash: bytes) -> str:
         """S2→S3: Anchor lab proof. Uses oracle key from env."""
+        if not self.oracle_key:
+            raise ValueError(
+                "Oracle private key is not configured; set ORACLE_PRIVATE_KEY "
+                "to anchor lab proofs."
+            )
         fn = self.registry.functions.anchorLabProof(batch_id, proof_hash)
         return self._sign_and_send(fn, self.oracle_key)
 
