@@ -49,7 +49,25 @@ def _get_user_signing_key(db: Session, user_id: int, user_role: str) -> str:
         EthWallet.user_role == user_role,
     ).first()
     if wallet:
-        key = decrypt_private_key(wallet.encrypted_key)
+        try:
+            key = decrypt_private_key(wallet.encrypted_key)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Failed to decrypt wallet private key for user_id=%s role=%s wallet=%s",
+                user_id,
+                user_role,
+                wallet.wallet_address,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "User wallet is temporarily unavailable due to a server-side "
+                    "encryption configuration or wallet data issue. Verify "
+                    "WALLET_ENCRYPTION_KEY and stored wallet data."
+                ),
+            ) from exc
         # Ensure wallet has gas (admin funds it if needed on dev/testnet)
         blockchain_service.fund_account(wallet.wallet_address)
         return key
