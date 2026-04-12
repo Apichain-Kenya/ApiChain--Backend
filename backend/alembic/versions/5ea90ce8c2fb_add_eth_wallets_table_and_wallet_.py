@@ -28,7 +28,7 @@ def upgrade() -> None:
     sa.Column('wallet_address', sa.String(), nullable=False),
     sa.Column('encrypted_key', sa.Text(), nullable=False),
     sa.Column('blockchain_role', sa.String(), nullable=True),
-    sa.Column('role_granted', sa.Boolean(), nullable=True),
+    sa.Column('role_granted', sa.Boolean(), nullable=False, server_default=sa.false()),
     sa.Column('role_tx_hash', sa.String(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.PrimaryKeyConstraint('id')
