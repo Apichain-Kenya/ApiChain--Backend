@@ -113,3 +113,10 @@ class BatchVerifyResponse(BaseModel):
     lab_verified: bool
     timeline: BatchTimelineResponse
     hashes: BatchHashesResponse
+
+
+class SimpleBatchCreateRequest(BaseModel):
+    farmer_id: int
+    apiary_id: Optional[int] = None
+    harvest_date: datetime
+    quantity: float

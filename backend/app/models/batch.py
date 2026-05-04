@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Float
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 from app.database import Base
@@ -8,13 +8,23 @@ class HoneyBatch(Base):
     __tablename__ = "honey_batches"
 
     id = Column(Integer, primary_key=True, index=True)
+
+    # Blockchain identity
     blockchain_batch_id = Column(String, unique=True, index=True, nullable=False)
 
-    # The farmer who created this batch
+    #  Relationships
     farmer_id = Column(Integer, ForeignKey("farmers.id"), nullable=False)
-    farmer = relationship("Farmer")
+    apiary_id = Column(Integer, ForeignKey("apiary_locations.id"), nullable=True)
 
-    # Off-chain data (raw payloads whose keccak256 hashes go on-chain)
+    farmer = relationship("Farmer")
+    apiary = relationship("ApiaryLocation", back_populates="honey_batches")
+
+    #  Core batch data (your original system)
+    harvest_date = Column(DateTime, nullable=True)
+    quantity = Column(Float, nullable=True)
+    # CREATED → HARVESTED → PROCESSED → LAB_VERIFIED → PACKAGED → DISTRIBUTED
+
+    #  Blockchain payloads (off-chain storage)
     apiary_data = Column(JSON, nullable=True)
     metadata_payload = Column(JSON, nullable=True)
     harvest_data = Column(JSON, nullable=True)
@@ -23,23 +33,26 @@ class HoneyBatch(Base):
     packaging_data = Column(JSON, nullable=True)
     distribution_data = Column(JSON, nullable=True)
 
-    # Current state mirrored from blockchain (for fast DB queries)
+    # State mirror (blockchain)
     current_state = Column(String, default="CREATED", nullable=False)
 
-    # Transaction hashes for each state transition
-    create_tx_hash = Column(String, nullable=True)
-    harvest_tx_hash = Column(String, nullable=True)
-    process_tx_hash = Column(String, nullable=True)
-    lab_verify_tx_hash = Column(String, nullable=True)
-    packaging_tx_hash = Column(String, nullable=True)
-    distribution_tx_hash = Column(String, nullable=True)
+    #  Transaction hashes
+    create_tx_hash = Column(String)
+    harvest_tx_hash = Column(String)
+    process_tx_hash = Column(String)
+    lab_verify_tx_hash = Column(String)
+    packaging_tx_hash = Column(String)
+    distribution_tx_hash = Column(String)
 
-    # Timestamps (mirrored from chain via tx receipts)
-    created_at = Column(
-        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
-    )
-    harvested_at = Column(DateTime, nullable=True)
-    processed_at = Column(DateTime, nullable=True)
-    lab_verified_at = Column(DateTime, nullable=True)
-    packaged_at = Column(DateTime, nullable=True)
-    distributed_at = Column(DateTime, nullable=True)
+    # Lifecycle timestamps
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    harvested_at = Column(DateTime)
+    processed_at = Column(DateTime)
+    lab_verified_at = Column(DateTime)
+    packaged_at = Column(DateTime)
+    distributed_at = Column(DateTime)
+
+    #lab_result = relationship("LabResult", back_populates="batch", uselist=False)
+    #environmental_data = relationship("EnvironmentalData", back_populates="batch", uselist=False)
+    #prediction = relationship("PredictionResult", back_populates="batch", uselist=False)
+    #validation = relationship("ValidationResult", back_populates="batch", uselist=False)

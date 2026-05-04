@@ -28,6 +28,7 @@ from app.schemas.batch import (
     LabVerifyRequest,
     PackagingRequest,
     ProcessingRequest,
+    SimpleBatchCreateRequest,
 )
 from app.models.eth_wallet import EthWallet
 from app.services.blockchain import blockchain_service
@@ -483,3 +484,45 @@ def verify_batch(batch_id: str):
         timeline=BatchTimelineResponse(batch_id=batch_id, **timeline),
         hashes=BatchHashesResponse(batch_id=batch_id, **hashes),
     )
+
+
+@router.post("/simple", response_model=BatchResponse)
+def create_simple_batch(
+    data: SimpleBatchCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Simple batch creation for frontend use.
+    Does NOT interact with blockchain.
+    Safe: does not affect existing blockchain flow.
+    """
+
+    batch = HoneyBatch(
+        blockchain_batch_id=f"OFFCHAIN-{int(datetime.now().timestamp())}",  # placeholder
+        farmer_id=data.farmer_id,
+        apiary_id=data.apiary_id,
+        harvest_date=data.harvest_date,
+        quantity=data.quantity,
+        current_state="CREATED",
+        created_at=datetime.now(timezone.utc),
+    )
+
+    db.add(batch)
+    db.commit()
+    db.refresh(batch)
+
+    return batch
+
+
+@router.get("/simple/all", response_model=list[BatchResponse])
+def get_simple_batches(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Get all batches (including simple frontend ones)
+    """
+
+    batches = db.query(HoneyBatch).order_by(HoneyBatch.created_at.desc()).all()
+    return batches
