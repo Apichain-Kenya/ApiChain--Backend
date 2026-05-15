@@ -52,7 +52,18 @@ class HoneyBatch(Base):
     packaged_at = Column(DateTime)
     distributed_at = Column(DateTime)
 
-    #lab_result = relationship("LabResult", back_populates="batch", uselist=False)
-    #environmental_data = relationship("EnvironmentalData", back_populates="batch", uselist=False)
+    lab_result = relationship(
+    "LabResult",
+    back_populates="batch",
+    uselist=False,
+    cascade="all, delete-orphan"
+)
+
+    environmental_data = relationship(
+    "EnvironmentalData",
+    back_populates="batch",
+    uselist=False,
+    cascade="all, delete-orphan"
+)
     #prediction = relationship("PredictionResult", back_populates="batch", uselist=False)
     #validation = relationship("ValidationResult", back_populates="batch", uselist=False)

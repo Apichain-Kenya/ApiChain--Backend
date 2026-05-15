@@ -10,7 +10,7 @@ from fastapi.security import HTTPBearer
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app import database
-from app.routers import auth, farmers, aggregator, user, batch
+from app.routers import auth, farmers, aggregator, user, batch, environmental, lab_results
 app = FastAPI()
 
 security = HTTPBearer()
@@ -40,6 +40,8 @@ app.include_router(farmers.router)
 app.include_router(aggregator.router)
 app.include_router(user.router)
 app.include_router(batch.router)
+app.include_router(environmental.router)
+app.include_router(lab_results.router)
 
 
 def custom_openapi():

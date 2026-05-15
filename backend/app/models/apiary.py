@@ -24,3 +24,4 @@ class ApiaryLocation(Base):
 
     farmer = relationship("Farmer", back_populates="apiaries")
     honey_batches = relationship("HoneyBatch", back_populates="apiary")
+    

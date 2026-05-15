@@ -16,6 +16,8 @@ from web3.exceptions import ContractLogicError
 from app.database import get_db
 from app.deps import get_current_user, require_roles
 from app.models.batch import HoneyBatch
+from app.models.environmental_data import EnvironmentalData
+from app.models.apiary import ApiaryLocation
 from app.schemas.batch import (
     BatchCreateRequest,
     BatchResponse,
@@ -33,6 +35,7 @@ from app.schemas.batch import (
 from app.models.eth_wallet import EthWallet
 from app.services.blockchain import blockchain_service
 from app.services.encryption import decrypt_private_key
+from app.services.environment import fetch_environment_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -493,23 +496,82 @@ def create_simple_batch(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Simple batch creation for frontend use.
-    Does NOT interact with blockchain.
-    Safe: does not affect existing blockchain flow.
+    Simple batch creation with environmental snapshot.
     """
 
+    # -------------------------
+    # VALIDATE APIARY
+    # -------------------------
+
+    apiary = db.query(ApiaryLocation).filter(
+        ApiaryLocation.id == data.apiary_id
+    ).first()
+
+    if not apiary:
+        raise HTTPException(
+            status_code=404,
+            detail="Apiary not found"
+        )
+
+    # -------------------------
+    # CREATE BATCH
+    # -------------------------
+
     batch = HoneyBatch(
-        blockchain_batch_id=f"OFFCHAIN-{int(datetime.now().timestamp())}",  # placeholder
+        blockchain_batch_id=f"OFFCHAIN-{int(datetime.now().timestamp())}",
+
         farmer_id=data.farmer_id,
+
         apiary_id=data.apiary_id,
+
         harvest_date=data.harvest_date,
+
         quantity=data.quantity,
-        current_state="CREATED",
+
+        current_state="HARVESTED",
+
         created_at=datetime.now(timezone.utc),
+
+        harvested_at=data.harvest_date,
     )
 
     db.add(batch)
+
     db.commit()
+
+    db.refresh(batch)
+
+    # -------------------------
+    # FETCH ENVIRONMENT DATA
+    # -------------------------
+
+    env_data = fetch_environment_snapshot(
+        apiary.latitude,
+        apiary.longitude
+    )
+
+    environmental_record = EnvironmentalData(
+        batch_id=batch.id,
+
+        temperature=env_data["temperature"],
+
+        humidity=env_data["humidity"],
+
+        rainfall=env_data["rainfall"],
+
+        pressure=env_data["pressure"],
+
+        cloud_cover=env_data["cloud_cover"],
+
+        wind_speed=env_data["wind_speed"],
+
+        weather_source=env_data["weather_source"],
+    )
+
+    db.add(environmental_record)
+
+    db.commit()
+
     db.refresh(batch)
 
     return batch
