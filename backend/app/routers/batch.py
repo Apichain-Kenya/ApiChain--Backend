@@ -41,39 +41,46 @@ router = APIRouter(prefix="/batches", tags=["Batches"])
 def _get_user_signing_key(db: Session, user_id: int, user_role: str) -> str:
     """
     Look up the user's encrypted private key and decrypt it.
-    Falls back to admin key if no wallet found (backwards compat).
-    Also ensures the wallet has gas funds (for dev/testnet).
+
+    Hard-fails (HTTP 500) if no `EthWallet` row exists. Every role that can
+    reach a write endpoint is in `ROLES_NEEDING_WALLET` and must have a
+    wallet provisioned at enrollment. If you encounter this error in
+    practice, run `scripts/backfill_wallets.py` to repair legacy users.
     """
     wallet = db.query(EthWallet).filter(
         EthWallet.user_id == user_id,
         EthWallet.user_role == user_role,
     ).first()
-    if wallet:
-        try:
-            key = decrypt_private_key(wallet.encrypted_key)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.exception(
-                "Failed to decrypt wallet private key for user_id=%s role=%s wallet=%s",
-                user_id,
-                user_role,
-                wallet.wallet_address,
-            )
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "User wallet is temporarily unavailable due to a server-side "
-                    "encryption configuration or wallet data issue. Verify "
-                    "WALLET_ENCRYPTION_KEY and stored wallet data."
-                ),
-            ) from exc
-        # Ensure wallet has gas (admin funds it if needed on dev/testnet)
-        blockchain_service.fund_account(wallet.wallet_address)
-        return key
-    # Fallback for users registered before Stage 2
-    # Falling back to the admin key for users without wallets creates a security risk where all legacy users share the same signing key. This could lead to transaction attribution issues and security vulnerabilities. Consider requiring wallet migration or implementing a more secure fallback mechanism.
-    return blockchain_service.admin_key
+    if not wallet:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"User {user_id} ({user_role}) has no wallet — re-enrollment "
+                f"required. Run scripts/backfill_wallets.py to repair."
+            ),
+        )
+    try:
+        key = decrypt_private_key(wallet.encrypted_key)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Failed to decrypt wallet private key for user_id=%s role=%s wallet=%s",
+            user_id,
+            user_role,
+            wallet.wallet_address,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "User wallet is temporarily unavailable due to a server-side "
+                "encryption configuration or wallet data issue. Verify "
+                "WALLET_ENCRYPTION_KEY and stored wallet data."
+            ),
+        ) from exc
+    # Ensure wallet has gas (admin funds it if needed on dev/testnet)
+    blockchain_service.fund_account(wallet.wallet_address)
+    return key
 
 
 def _check_blockchain():
@@ -86,6 +93,41 @@ def _check_blockchain():
         raise HTTPException(
             status_code=503,
             detail="Contract addresses not configured. Set REGISTRY_ADDRESS and ROLE_MANAGER_ADDRESS in .env",
+        )
+
+
+def _batch_id_to_bytes(batch_id: str) -> bytes:
+    """Decode a batch_id hex string (with or without 0x prefix) into 32-byte form."""
+    hex_part = batch_id[2:] if batch_id.startswith("0x") else batch_id
+    return bytes.fromhex(hex_part)
+
+
+def _commit_or_orphan(db: Session, batch_id: str, tx_hash: str) -> None:
+    """
+    Commit the DB session, but surface an actionable error if commit fails
+    AFTER the on-chain tx has already succeeded.
+
+    The on-chain write is durable; the DB row is not. If commit fails the
+    batch is "orphaned" — visible via /verify but missing from local list/
+    detail endpoints. The remediation is `scripts/reconcile_batches.py`.
+    """
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "DB commit failed AFTER on-chain tx %s for batch %s; batch is orphaned in DB",
+            tx_hash,
+            batch_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "db_commit_failed_after_chain_success",
+                "batch_id": batch_id,
+                "tx_hash": tx_hash,
+                "remediation": "Run scripts/reconcile_batches.py to repair local row from chain state.",
+            },
         )
 
 
@@ -113,7 +155,7 @@ def create_batch(
     metadata_hash = blockchain_service.compute_data_hash(data.metadata)
 
     try:
-        tx_hash = blockchain_service.create_batch(
+        tx_hash, block_ts = blockchain_service.create_batch(
             signer_key, batch_id_bytes, apiary_hash, metadata_hash
         )
     except ContractLogicError as e:
@@ -130,9 +172,10 @@ def create_batch(
         metadata_payload=data.metadata,
         current_state="CREATED",
         create_tx_hash=tx_hash,
+        created_at=datetime.fromtimestamp(block_ts, tz=timezone.utc),
     )
     db.add(batch)
-    db.commit()
+    _commit_or_orphan(db, "0x" + batch_id_bytes.hex(), tx_hash)
 
     return BatchTransitionResponse(
         batch_id="0x" + batch_id_bytes.hex(),
@@ -164,13 +207,14 @@ def record_harvest(
     if batch.current_state != "CREATED":
         raise HTTPException(status_code=400, detail=f"Batch is in state {batch.current_state}, expected CREATED")
 
-    harvest_payload = data.model_dump()
+    # mode="json" serializes datetime → ISO string so the payload is both
+    # JSON-storable on the DB column and deterministically hashable.
+    harvest_payload = data.model_dump(mode="json")
     harvest_hash = blockchain_service.compute_data_hash(harvest_payload)
-    # The hex string to bytes conversion logic is duplicated across multiple endpoints (lines 150, 200, 250, 298, 348, 416, 431, 449). Consider extracting this into a helper function to reduce duplication and improve maintainability.
-    batch_id_bytes = bytes.fromhex(batch_id[2:]) if batch_id.startswith("0x") else bytes.fromhex(batch_id)
+    batch_id_bytes = _batch_id_to_bytes(batch_id)
 
     try:
-        tx_hash = blockchain_service.record_harvest(
+        tx_hash, block_ts = blockchain_service.record_harvest(
             _get_user_signing_key(db, current_user["user_id"], current_user["role"]), batch_id_bytes, harvest_hash
         )
     except ContractLogicError as e:
@@ -182,8 +226,8 @@ def record_harvest(
     batch.harvest_data = harvest_payload
     batch.current_state = "HARVESTED"
     batch.harvest_tx_hash = tx_hash
-    batch.harvested_at = datetime.now(timezone.utc)
-    db.commit()
+    batch.harvested_at = datetime.fromtimestamp(block_ts, tz=timezone.utc)
+    _commit_or_orphan(db, batch_id, tx_hash)
 
     return BatchTransitionResponse(
         batch_id=batch_id,
@@ -217,10 +261,10 @@ def record_processing(
 
     process_payload = data.model_dump()
     process_hash = blockchain_service.compute_data_hash(process_payload)
-    batch_id_bytes = bytes.fromhex(batch_id[2:]) if batch_id.startswith("0x") else bytes.fromhex(batch_id)
+    batch_id_bytes = _batch_id_to_bytes(batch_id)
 
     try:
-        tx_hash = blockchain_service.record_processing(
+        tx_hash, block_ts = blockchain_service.record_processing(
             _get_user_signing_key(db, current_user["user_id"], current_user["role"]), batch_id_bytes, process_hash
         )
     except ContractLogicError as e:
@@ -232,8 +276,8 @@ def record_processing(
     batch.process_data = process_payload
     batch.current_state = "PROCESSED"
     batch.process_tx_hash = tx_hash
-    batch.processed_at = datetime.now(timezone.utc)
-    db.commit()
+    batch.processed_at = datetime.fromtimestamp(block_ts, tz=timezone.utc)
+    _commit_or_orphan(db, batch_id, tx_hash)
 
     return BatchTransitionResponse(
         batch_id=batch_id,
@@ -254,7 +298,12 @@ def anchor_lab_proof(
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles(["lab_test_officer", "admin", "super_admin"])),
 ):
-    """Anchor lab verification proof. Uses oracle key from env."""
+    """Anchor lab verification proof.
+
+    Signs with the system oracle key, deliberately bypassing
+    `_get_user_signing_key()` — ORACLE_ROLE is one trusted EOA, not a user
+    identity. See `blockchain_service.anchor_lab_proof` for details.
+    """
     _check_blockchain()
 
     batch = db.query(HoneyBatch).filter(
@@ -267,10 +316,10 @@ def anchor_lab_proof(
 
     proof_payload = data.model_dump()
     proof_hash = blockchain_service.compute_data_hash(proof_payload)
-    batch_id_bytes = bytes.fromhex(batch_id[2:]) if batch_id.startswith("0x") else bytes.fromhex(batch_id)
+    batch_id_bytes = _batch_id_to_bytes(batch_id)
 
     try:
-        tx_hash = blockchain_service.anchor_lab_proof(batch_id_bytes, proof_hash)
+        tx_hash, block_ts = blockchain_service.anchor_lab_proof(batch_id_bytes, proof_hash)
     except ContractLogicError as e:
         raise HTTPException(status_code=400, detail=f"Contract error: {e}")
     except Exception as e:
@@ -280,8 +329,8 @@ def anchor_lab_proof(
     batch.lab_proof_data = proof_payload
     batch.current_state = "LAB_VERIFIED"
     batch.lab_verify_tx_hash = tx_hash
-    batch.lab_verified_at = datetime.now(timezone.utc)
-    db.commit()
+    batch.lab_verified_at = datetime.fromtimestamp(block_ts, tz=timezone.utc)
+    _commit_or_orphan(db, batch_id, tx_hash)
 
     return BatchTransitionResponse(
         batch_id=batch_id,
@@ -315,10 +364,10 @@ def record_packaging(
 
     packaging_payload = data.model_dump()
     packaging_hash = blockchain_service.compute_data_hash(packaging_payload)
-    batch_id_bytes = bytes.fromhex(batch_id[2:]) if batch_id.startswith("0x") else bytes.fromhex(batch_id)
+    batch_id_bytes = _batch_id_to_bytes(batch_id)
 
     try:
-        tx_hash = blockchain_service.record_packaging(
+        tx_hash, block_ts = blockchain_service.record_packaging(
             _get_user_signing_key(db, current_user["user_id"], current_user["role"]), batch_id_bytes, packaging_hash
         )
     except ContractLogicError as e:
@@ -330,8 +379,8 @@ def record_packaging(
     batch.packaging_data = packaging_payload
     batch.current_state = "PACKAGED"
     batch.packaging_tx_hash = tx_hash
-    batch.packaged_at = datetime.now(timezone.utc)
-    db.commit()
+    batch.packaged_at = datetime.fromtimestamp(block_ts, tz=timezone.utc)
+    _commit_or_orphan(db, batch_id, tx_hash)
 
     return BatchTransitionResponse(
         batch_id=batch_id,
@@ -365,10 +414,10 @@ def record_distribution(
 
     dist_payload = data.model_dump()
     dist_hash = blockchain_service.compute_data_hash(dist_payload)
-    batch_id_bytes = bytes.fromhex(batch_id[2:]) if batch_id.startswith("0x") else bytes.fromhex(batch_id)
+    batch_id_bytes = _batch_id_to_bytes(batch_id)
 
     try:
-        tx_hash = blockchain_service.record_distribution(
+        tx_hash, block_ts = blockchain_service.record_distribution(
             _get_user_signing_key(db, current_user["user_id"], current_user["role"]), batch_id_bytes, dist_hash
         )
     except ContractLogicError as e:
@@ -380,8 +429,8 @@ def record_distribution(
     batch.distribution_data = dist_payload
     batch.current_state = "DISTRIBUTED"
     batch.distribution_tx_hash = tx_hash
-    batch.distributed_at = datetime.now(timezone.utc)
-    db.commit()
+    batch.distributed_at = datetime.fromtimestamp(block_ts, tz=timezone.utc)
+    _commit_or_orphan(db, batch_id, tx_hash)
 
     return BatchTransitionResponse(
         batch_id=batch_id,
@@ -433,7 +482,7 @@ def get_batch_timeline(batch_id: str):
     """Get batch timeline directly from blockchain (no auth required)."""
     _check_blockchain()
 
-    batch_id_bytes = bytes.fromhex(batch_id[2:]) if batch_id.startswith("0x") else bytes.fromhex(batch_id)
+    batch_id_bytes = _batch_id_to_bytes(batch_id)
 
     try:
         timeline = blockchain_service.get_batch_timeline(batch_id_bytes)
@@ -448,7 +497,7 @@ def get_batch_hashes(batch_id: str):
     """Get all hash anchors directly from blockchain (no auth required)."""
     _check_blockchain()
 
-    batch_id_bytes = bytes.fromhex(batch_id[2:]) if batch_id.startswith("0x") else bytes.fromhex(batch_id)
+    batch_id_bytes = _batch_id_to_bytes(batch_id)
 
     try:
         hashes = blockchain_service.get_batch_hashes(batch_id_bytes)
@@ -466,7 +515,7 @@ def verify_batch(batch_id: str):
     """
     _check_blockchain()
 
-    batch_id_bytes = bytes.fromhex(batch_id[2:]) if batch_id.startswith("0x") else bytes.fromhex(batch_id)
+    batch_id_bytes = _batch_id_to_bytes(batch_id)
 
     try:
         batch_data = blockchain_service.get_batch(batch_id_bytes)

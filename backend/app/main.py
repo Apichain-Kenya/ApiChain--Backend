@@ -10,7 +10,8 @@ from fastapi.security import HTTPBearer
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app import database
-from app.routers import auth, farmers, aggregator, user, batch
+from app.routers import auth, farmers, user, batch
+# aggregator router deprecated after 2026-04-12 pivot; see aggregator.py docstring.
 app = FastAPI()
 
 security = HTTPBearer()
@@ -37,9 +38,9 @@ def root():
 
 app.include_router(auth.router)
 app.include_router(farmers.router)
-app.include_router(aggregator.router)
 app.include_router(user.router)
 app.include_router(batch.router)
+# app.include_router(aggregator.router)  # deprecated, see aggregator.py
 
 
 def custom_openapi():

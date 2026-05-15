@@ -1,6 +1,6 @@
 from typing import Optional
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # -- Request schemas --
@@ -13,39 +13,61 @@ class BatchCreateRequest(BaseModel):
 
 class HarvestRequest(BaseModel):
     """Data for recording harvest (S0→S1)."""
-    harvest_date: str
-    quantity_kg: float
-    hive_ids: list[str] = []
-    gps_lat: Optional[float] = None
-    gps_lon: Optional[float] = None
+    harvest_date: datetime
+    quantity_kg: float = Field(gt=0)
+    hive_ids: list[str] = Field(min_length=1)
+    gps_lat: Optional[float] = Field(default=None, ge=-90, le=90)
+    gps_lon: Optional[float] = Field(default=None, ge=-180, le=180)
     notes: Optional[str] = None
 
 
 class ProcessingRequest(BaseModel):
     """Data for recording processing (S1→S2)."""
-    extraction_method: str
-    moisture_content: Optional[float] = None
+    extraction_method: str = Field(min_length=1)
+    moisture_content: Optional[float] = Field(default=None, ge=0, le=100)
     handling_notes: Optional[str] = None
+
+
+class LabResults(BaseModel):
+    """Structured lab test results. Extra fields permitted for lab-specific data."""
+    model_config = ConfigDict(extra="allow")
+
+    moisture_pct: float = Field(ge=0, le=100)
+    hmf_mg_per_kg: float = Field(ge=0)
+    diastase_activity: float = Field(ge=0)
+    passed: bool
 
 
 class LabVerifyRequest(BaseModel):
     """Data for anchoring lab proof (S2→S3). Oracle-only."""
-    lab_results: dict
-    verifier_name: str
+    lab_results: LabResults
+    verifier_name: str = Field(min_length=1)
     file_hash: Optional[str] = None
 
 
 class PackagingRequest(BaseModel):
     """Data for recording packaging (S3→S4)."""
-    unit_count: int
-    jar_ids: list[str] = []
-    qr_codes: list[str] = []
+    unit_count: int = Field(ge=1)
+    jar_ids: list[str] = Field(min_length=1)
+    qr_codes: list[str] = Field(min_length=1)
     notes: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _check_count_consistency(self) -> "PackagingRequest":
+        if len(self.jar_ids) != self.unit_count:
+            raise ValueError(
+                f"jar_ids length ({len(self.jar_ids)}) must equal unit_count ({self.unit_count})"
+            )
+        if len(self.qr_codes) != self.unit_count:
+            raise ValueError(
+                f"qr_codes length ({len(self.qr_codes)}) must equal unit_count ({self.unit_count})"
+            )
+        return self
 
 
 class DistributionRequest(BaseModel):
     """Data for recording distribution (S4→S5, terminal)."""
-    retailer_name: str
+    retailer_name: str = Field(min_length=1)
     transport_reference: Optional[str] = None
     handover_notes: Optional[str] = None
 

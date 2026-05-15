@@ -1,3 +1,15 @@
+"""
+DEPRECATED — kept for backward compatibility only.
+
+The "aggregator" concept was decomposed into 8 specific user roles
+during the 2026-04-12 auth pivot (see ApiChain Kenya/.claude/CLAUDE.md
+"User Roles" section). The `aggregators` table and this router survive
+so existing alembic migrations remain reversible, but the endpoints
+should not be linked from frontends or relied upon by new code.
+
+Slated for full removal in Sprint 2 after a clean drop-table migration.
+"""
+
 import os, shutil
 import requests
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -11,7 +23,7 @@ from app.models.document import Document
 from geoalchemy2.shape import from_shape
 from shapely.geometry import Point
 
-router = APIRouter(prefix="/aggregators", tags=["Aggregators"])
+router = APIRouter(prefix="/aggregators", tags=["Aggregators (deprecated)"])
 
 
 @router.post("/details/{agg_id}")
