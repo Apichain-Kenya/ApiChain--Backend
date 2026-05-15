@@ -138,7 +138,14 @@ class BatchVerifyResponse(BaseModel):
 
 
 class SimpleBatchCreateRequest(BaseModel):
-    farmer_id: int
-    apiary_id: Optional[int] = None
+    """One-shot batch creation: anchors S0 (CREATED) and S1 (HARVESTED) on chain
+    in a single call, then attaches a fresh environmental snapshot.
+
+    The farmer is taken from the JWT, not the request body, so authenticated
+    users cannot create batches attributed to other farmers.
+    """
+    apiary_id: int
     harvest_date: datetime
-    quantity: float
+    quantity_kg: float = Field(gt=0)
+    hive_ids: list[str] = Field(min_length=1)
+    notes: Optional[str] = None
