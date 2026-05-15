@@ -114,6 +114,9 @@ class BlockchainService:
 
     @property
     def is_connected(self) -> bool:
+        # TODO(sprint-2): transient RPC failures here 503 every batch endpoint
+        # at once. Add a short-window retry or circuit-breaker before relying
+        # on this in production.
         try:
             return self.w3.is_connected()
         except Exception:
@@ -123,14 +126,16 @@ class BlockchainService:
     # Account funding (for dev/testnet -- new wallets start with 0 ETH)
     # ------------------------------------------------------------------
 
-    def fund_account(self, address: str, amount_eth: float = 0.1) -> Optional[str]:
+    def fund_account(self, address: str, amount_eth: float = 0.001) -> Optional[str]:
         """
         Send ETH from admin wallet to a user wallet so it can pay gas.
         Only needed on Hardhat/testnet where new wallets have 0 balance.
+        Default 0.001 ETH is enough for ~5 lifecycle txs on Sepolia at
+        normal gas prices; raise it if you see "insufficient funds" reverts.
         Returns tx hash or None if funding not needed or failed.
         """
         balance = self.w3.eth.get_balance(address)
-        min_balance = self.w3.to_wei(0.01, "ether")
+        min_balance = self.w3.to_wei(0.0005, "ether")
         if balance >= min_balance:
             return None  # already funded
 
@@ -161,7 +166,7 @@ class BlockchainService:
     # Generic transaction helper
     # ------------------------------------------------------------------
 
-    def _sign_and_send(self, contract_fn, private_key: str) -> str:
+    def _sign_and_send(self, contract_fn, private_key: str) -> tuple[str, int]:
         """
         Build, sign, send a transaction and wait for receipt.
 
@@ -171,7 +176,8 @@ class BlockchainService:
             private_key: Hex private key of the signer.
 
         Returns:
-            Transaction hash as hex string.
+            (tx_hash_hex, block_timestamp_unix) — block timestamp comes from
+            the mined block so callers can record chain time, not local time.
 
         Raises:
             ContractLogicError: If the contract reverts.
@@ -195,12 +201,10 @@ class BlockchainService:
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
 
         if receipt["status"] != 1:
-            raise Exception(
-                f"Transaction reverted: {tx_hash.hex()}"
-                # Consider including the operation type or additional context to make debugging easier.
-            )
+            raise Exception(f"Transaction reverted: {tx_hash.hex()}")
 
-        return tx_hash.hex()
+        block = self.w3.eth.get_block(receipt["blockNumber"])
+        return tx_hash.hex(), int(block["timestamp"])
 
     # ------------------------------------------------------------------
     # Hash computation
@@ -237,14 +241,16 @@ class BlockchainService:
         fn = self.role_manager.functions.grantActorRole(
             role, Web3.to_checksum_address(account_address)
         )
-        return self._sign_and_send(fn, self.admin_key)
+        tx_hash, _ = self._sign_and_send(fn, self.admin_key)
+        return tx_hash
 
     def revoke_role(self, role: bytes, account_address: str) -> str:
         """Revoke a blockchain role from an address. Uses admin key."""
         fn = self.role_manager.functions.revokeActorRole(
             role, Web3.to_checksum_address(account_address)
         )
-        return self._sign_and_send(fn, self.admin_key)
+        tx_hash, _ = self._sign_and_send(fn, self.admin_key)
+        return tx_hash
 
     def check_role(self, role: bytes, account_address: str) -> bool:
         """Check if an address has a specific role (read-only, no gas)."""
@@ -262,8 +268,11 @@ class BlockchainService:
         batch_id: bytes,
         apiary_hash: bytes,
         metadata_hash: bytes,
-    ) -> str:
-        """S0: Create a new batch. Caller must have BEEKEEPER_ROLE."""
+    ) -> tuple[str, int]:
+        """S0: Create a new batch. Caller must have BEEKEEPER_ROLE.
+
+        Returns (tx_hash, block_timestamp).
+        """
         fn = self.registry.functions.createBatch(
             batch_id, apiary_hash, metadata_hash
         )
@@ -271,20 +280,37 @@ class BlockchainService:
 
     def record_harvest(
         self, private_key: str, batch_id: bytes, harvest_hash: bytes
-    ) -> str:
-        """S0→S1: Record harvest. Must be the batch creator."""
+    ) -> tuple[str, int]:
+        """S0→S1: Record harvest. Must be the batch creator.
+
+        Returns (tx_hash, block_timestamp).
+        """
         fn = self.registry.functions.recordHarvest(batch_id, harvest_hash)
         return self._sign_and_send(fn, private_key)
 
     def record_processing(
         self, private_key: str, batch_id: bytes, process_hash: bytes
-    ) -> str:
-        """S1→S2: Record processing. BEEKEEPER or PROCESSOR."""
+    ) -> tuple[str, int]:
+        """S1→S2: Record processing. BEEKEEPER or PROCESSOR.
+
+        Returns (tx_hash, block_timestamp).
+        """
         fn = self.registry.functions.recordProcessing(batch_id, process_hash)
         return self._sign_and_send(fn, private_key)
 
-    def anchor_lab_proof(self, batch_id: bytes, proof_hash: bytes) -> str:
-        """S2→S3: Anchor lab proof. Uses oracle key from env."""
+    def anchor_lab_proof(
+        self, batch_id: bytes, proof_hash: bytes
+    ) -> tuple[str, int]:
+        """S2→S3: Anchor lab proof.
+
+        Signs with the system oracle key (`ORACLE_PRIVATE_KEY`), NOT a per-user
+        wallet. ORACLE_ROLE is a single trusted EOA assigned to the backend,
+        not a user identity — multiple lab_test_officer users share this
+        signer. Do not change this to per-user signing without first granting
+        ORACLE_ROLE to each lab tester's wallet on-chain.
+
+        Returns (tx_hash, block_timestamp).
+        """
         if not self.oracle_key:
             raise ValueError(
                 "Oracle private key is not configured; set ORACLE_PRIVATE_KEY "
@@ -295,15 +321,21 @@ class BlockchainService:
 
     def record_packaging(
         self, private_key: str, batch_id: bytes, packaging_hash: bytes
-    ) -> str:
-        """S3→S4: Record packaging. BEEKEEPER or PROCESSOR."""
+    ) -> tuple[str, int]:
+        """S3→S4: Record packaging. BEEKEEPER or PROCESSOR.
+
+        Returns (tx_hash, block_timestamp).
+        """
         fn = self.registry.functions.recordPackaging(batch_id, packaging_hash)
         return self._sign_and_send(fn, private_key)
 
     def record_distribution(
         self, private_key: str, batch_id: bytes, distribution_hash: bytes
-    ) -> str:
-        """S4→S5: Record distribution (terminal). DISTRIBUTOR or ADMIN."""
+    ) -> tuple[str, int]:
+        """S4→S5: Record distribution (terminal). DISTRIBUTOR or ADMIN.
+
+        Returns (tx_hash, block_timestamp).
+        """
         fn = self.registry.functions.recordDistribution(
             batch_id, distribution_hash
         )

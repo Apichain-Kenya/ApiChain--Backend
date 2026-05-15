@@ -5,7 +5,8 @@ from dotenv import load_dotenv
 from app.database import Base
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
-from app.models import farmer, aggregator, document
+from app.models import farmer, aggregator, document  # noqa: F401
+import app.models  # noqa: F401  -- registers all models on Base.metadata
 from geoalchemy2 import Geometry, Geography
 
 from alembic import context
