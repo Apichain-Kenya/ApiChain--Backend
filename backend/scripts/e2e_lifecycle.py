@@ -200,14 +200,13 @@ def run(base_url: str, invite_code: str) -> int:
             "password": employee_credentials["lab_test_officer"]["password"],
         })["access_token"]
         lab_resp = _post(client, f"/batches/{batch_id}/lab-verify", {
-            "lab_results": {
-                "moisture_pct": 18.2,
-                "hmf_mg_per_kg": 12.0,
-                "diastase_activity": 9.5,
-                "passed": True,
-            },
-            "verifier_name": "KEBS Lab #1",
-            "file_hash": "abcd1234",
+            "moisture_content": 18.2,
+            "hmf_level": 12.0,
+            "purity_score": 95.5,
+            "passed_quality_check": True,
+            "laboratory_name": "KEBS Lab #1",
+            "analyst_name": "Sprint3 E2E",
+            "certificate_number": "abcd1234",
         }, headers=_auth(lab_token))
         _assert(lab_resp["new_state"] == "LAB_VERIFIED", f"expected LAB_VERIFIED, got {lab_resp['new_state']}")
         rows.append(("LAB_VERIFY", "lab_test_officer (oracle)", lab_resp["tx_hash"], 0))

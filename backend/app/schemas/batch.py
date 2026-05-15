@@ -1,6 +1,6 @@
 from typing import Optional
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 # -- Request schemas --
@@ -28,21 +28,28 @@ class ProcessingRequest(BaseModel):
     handling_notes: Optional[str] = None
 
 
-class LabResults(BaseModel):
-    """Structured lab test results. Extra fields permitted for lab-specific data."""
-    model_config = ConfigDict(extra="allow")
-
-    moisture_pct: float = Field(ge=0, le=100)
-    hmf_mg_per_kg: float = Field(ge=0)
-    diastase_activity: float = Field(ge=0)
-    passed: bool
-
-
 class LabVerifyRequest(BaseModel):
-    """Data for anchoring lab proof (S2→S3). Oracle-only."""
-    lab_results: LabResults
-    verifier_name: str = Field(min_length=1)
-    file_hash: Optional[str] = None
+    """Data for anchoring lab proof (S2→S3). Oracle-signed.
+
+    Fields mirror the `lab_results` table columns so the persisted row is the
+    canonical pre-image of the on-chain proof hash. See `app/models/lab_result.py`.
+    """
+    # Lab metrics (units defined by laboratory; values are nullable so partial
+    # panels are accepted, but at least one must be present in practice).
+    moisture_content: Optional[float] = Field(default=None, ge=0, le=100)
+    sucrose_level: Optional[float] = Field(default=None, ge=0)
+    hmf_level: Optional[float] = Field(default=None, ge=0)
+    pollen_density: Optional[float] = Field(default=None, ge=0)
+    purity_score: Optional[float] = Field(default=None, ge=0, le=100)
+
+    # Required pass/fail verdict computed off-chain (by frontend or lab system).
+    passed_quality_check: bool
+
+    # Provenance metadata for the QR-verification phase.
+    laboratory_name: Optional[str] = None
+    analyst_name: Optional[str] = None
+    certificate_number: Optional[str] = None
+    notes: Optional[str] = None
 
 
 class PackagingRequest(BaseModel):

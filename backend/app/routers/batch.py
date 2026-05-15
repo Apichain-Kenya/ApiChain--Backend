@@ -18,6 +18,7 @@ from app.deps import get_current_user, require_roles
 from app.models.batch import HoneyBatch
 from app.models.environmental_data import EnvironmentalData
 from app.models.apiary import ApiaryLocation
+from app.models.lab_result import LabResult
 from app.schemas.batch import (
     BatchCreateRequest,
     BatchResponse,
@@ -295,6 +296,30 @@ def record_processing(
 # Anchor lab proof (S2 → S3) — Oracle only
 # ------------------------------------------------------------------
 
+def _lab_result_canonical_payload(row: LabResult) -> dict:
+    """Build the deterministic pre-image dict used for `proofHash`.
+
+    The persisted row is the single source of truth — re-running this on the
+    DB row at QR-verification time must reproduce the exact bytes that were
+    hashed at lab-verify time. Only stable, oracle-anchored columns are
+    included; `id`, `tested_at`, and `lab_proof_hash` are excluded (the first
+    two are DB-assigned post-hash; the third IS the hash).
+    """
+    return {
+        "batch_id": row.batch_id,
+        "moisture_content": row.moisture_content,
+        "sucrose_level": row.sucrose_level,
+        "hmf_level": row.hmf_level,
+        "pollen_density": row.pollen_density,
+        "purity_score": row.purity_score,
+        "passed_quality_check": row.passed_quality_check,
+        "laboratory_name": row.laboratory_name,
+        "analyst_name": row.analyst_name,
+        "certificate_number": row.certificate_number,
+        "notes": row.notes,
+    }
+
+
 @router.post("/{batch_id}/lab-verify", response_model=BatchTransitionResponse)
 def anchor_lab_proof(
     batch_id: str,
@@ -302,11 +327,16 @@ def anchor_lab_proof(
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles(["lab_test_officer", "admin", "super_admin"])),
 ):
-    """Anchor lab verification proof.
+    """Anchor lab verification proof (S2→S3).
 
     Signs with the system oracle key, deliberately bypassing
     `_get_user_signing_key()` — ORACLE_ROLE is one trusted EOA, not a user
     identity. See `blockchain_service.anchor_lab_proof` for details.
+
+    Flow: validate state → INSERT lab_results row (flushed but uncommitted) →
+    hash the persisted row → anchor on chain → store hash on row + tx on
+    batch → commit. If the chain call fails, the inserted row is rolled back
+    so no unanchored lab result is persisted.
     """
     _check_blockchain()
 
@@ -318,18 +348,34 @@ def anchor_lab_proof(
     if batch.current_state != "PROCESSED":
         raise HTTPException(status_code=400, detail=f"Batch is in state {batch.current_state}, expected PROCESSED")
 
-    proof_payload = data.model_dump()
+    existing = db.query(LabResult).filter(LabResult.batch_id == batch.id).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Lab result already exists for this batch")
+
+    # Insert + flush so DB-assigned columns (id, tested_at) are populated, but
+    # do NOT commit until the chain anchor succeeds.
+    row = LabResult(batch_id=batch.id, **data.model_dump())
+    db.add(row)
+    db.flush()
+
+    proof_payload = _lab_result_canonical_payload(row)
     proof_hash = blockchain_service.compute_data_hash(proof_payload)
     batch_id_bytes = _batch_id_to_bytes(batch_id)
 
     try:
         tx_hash, block_ts = blockchain_service.anchor_lab_proof(batch_id_bytes, proof_hash)
     except ContractLogicError as e:
+        db.rollback()
         raise HTTPException(status_code=400, detail=f"Contract error: {e}")
     except Exception as e:
+        db.rollback()
         logger.error(f"Blockchain error in anchor_lab_proof: {e}")
         raise HTTPException(status_code=502, detail="Blockchain transaction failed")
 
+    row.lab_proof_hash = "0x" + proof_hash.hex()
+    # Keep the legacy JSON blob for backward-compat with consumers reading
+    # honey_batches.lab_proof_data; the structured lab_results row is the
+    # canonical source going forward.
     batch.lab_proof_data = proof_payload
     batch.current_state = "LAB_VERIFIED"
     batch.lab_verify_tx_hash = tx_hash

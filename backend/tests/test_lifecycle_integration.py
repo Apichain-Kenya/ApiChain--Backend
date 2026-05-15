@@ -127,13 +127,11 @@ def test_full_lifecycle_walks_s0_to_s5(backend_base_url, invite_code):
         client, creds["lab_test_officer"]["username"], creds["lab_test_officer"]["password"]
     )
     r = client.post(f"/batches/{batch_id}/lab-verify", json={
-        "lab_results": {
-            "moisture_pct": 18.2,
-            "hmf_mg_per_kg": 12.0,
-            "diastase_activity": 9.5,
-            "passed": True,
-        },
-        "verifier_name": "KEBS Lab #1",
+        "moisture_content": 18.2,
+        "hmf_level": 12.0,
+        "purity_score": 95.5,
+        "passed_quality_check": True,
+        "laboratory_name": "KEBS Lab #1",
     }, headers=_auth(lab_token))
     assert r.status_code == 200, r.text
     assert r.json()["new_state"] == "LAB_VERIFIED"
