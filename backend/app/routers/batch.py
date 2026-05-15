@@ -542,98 +542,114 @@ def verify_batch(batch_id: str):
 def create_simple_batch(
     data: SimpleBatchCreateRequest,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_roles(["farmer"])),
 ):
-    """
-    Simple batch creation with environmental snapshot.
-    """
+    """One-shot batch creation that anchors S0 (CREATED) and S1 (HARVESTED)
+    on chain in a single call, then attaches a fresh environmental snapshot.
 
-    # -------------------------
-    # VALIDATE APIARY
-    # -------------------------
+    The frontend uses this for the "register a harvest" form so it gets a
+    real on-chain batch + environmental data without making three separate
+    calls. The farmer is taken from the JWT — request body cannot impersonate.
+    """
+    _check_blockchain()
+
+    farmer_id = current_user["user_id"]
 
     apiary = db.query(ApiaryLocation).filter(
         ApiaryLocation.id == data.apiary_id
     ).first()
-
     if not apiary:
+        raise HTTPException(status_code=404, detail="Apiary not found")
+    if apiary.farmer_id != farmer_id:
+        raise HTTPException(status_code=403, detail="Apiary does not belong to this farmer")
+
+    signer_key = _get_user_signing_key(db, farmer_id, current_user["role"])
+    signer_address = blockchain_service.w3.eth.account.from_key(signer_key).address
+
+    apiary_payload = {
+        "apiary_id": apiary.id,
+        "latitude": apiary.latitude,
+        "longitude": apiary.longitude,
+        "altitude": apiary.altitude,
+        "vegetation_type": apiary.vegetation_type,
+        "hive_count": apiary.hive_count,
+    }
+    metadata_payload = {"source": "simple_endpoint", "notes": data.notes}
+    harvest_payload = SimpleBatchCreateRequest.model_validate(data).model_dump(mode="json")
+
+    apiary_hash = blockchain_service.compute_data_hash(apiary_payload)
+    metadata_hash = blockchain_service.compute_data_hash(metadata_payload)
+    harvest_hash = blockchain_service.compute_data_hash(harvest_payload)
+
+    batch_id_bytes = blockchain_service.generate_batch_id(signer_address)
+    batch_id_hex = "0x" + batch_id_bytes.hex()
+
+    try:
+        create_tx, create_block_ts = blockchain_service.create_batch(
+            signer_key, batch_id_bytes, apiary_hash, metadata_hash
+        )
+    except ContractLogicError as e:
+        raise HTTPException(status_code=400, detail=f"Contract error (create): {e}")
+    except Exception as e:
+        logger.error(f"Blockchain error in simple create_batch: {e}")
+        raise HTTPException(status_code=502, detail="Blockchain transaction failed (create)")
+
+    # Top up gas — the create tx drained the dev-funded wallet; record_harvest
+    # would otherwise revert with insufficient funds on a second back-to-back tx.
+    blockchain_service.fund_account(signer_address)
+
+    try:
+        harvest_tx, harvest_block_ts = blockchain_service.record_harvest(
+            signer_key, batch_id_bytes, harvest_hash
+        )
+    except ContractLogicError as e:
+        raise HTTPException(status_code=400, detail=f"Contract error (harvest): {e}")
+    except Exception as e:
+        logger.error(f"Blockchain error in simple record_harvest: {e}")
         raise HTTPException(
-            status_code=404,
-            detail="Apiary not found"
+            status_code=502,
+            detail={
+                "error": "harvest_anchor_failed_after_create_succeeded",
+                "batch_id": batch_id_hex,
+                "create_tx_hash": create_tx,
+                "remediation": "Batch is in CREATED state on chain. Call POST /batches/{id}/harvest to advance.",
+            },
         )
 
-    # -------------------------
-    # CREATE BATCH
-    # -------------------------
-
     batch = HoneyBatch(
-        blockchain_batch_id=f"OFFCHAIN-{int(datetime.now().timestamp())}",
-
-        farmer_id=data.farmer_id,
-
-        apiary_id=data.apiary_id,
-
+        blockchain_batch_id=batch_id_hex,
+        farmer_id=farmer_id,
+        apiary_id=apiary.id,
+        apiary_data=apiary_payload,
+        metadata_payload=metadata_payload,
+        harvest_data=harvest_payload,
         harvest_date=data.harvest_date,
-
-        quantity=data.quantity,
-
+        quantity=data.quantity_kg,
         current_state="HARVESTED",
-
-        created_at=datetime.now(timezone.utc),
-
-        harvested_at=data.harvest_date,
+        create_tx_hash=create_tx,
+        harvest_tx_hash=harvest_tx,
+        created_at=datetime.fromtimestamp(create_block_ts, tz=timezone.utc),
+        harvested_at=datetime.fromtimestamp(harvest_block_ts, tz=timezone.utc),
     )
-
     db.add(batch)
+    db.flush()  # surface batch.id for the EnvironmentalData FK below
 
-    db.commit()
+    try:
+        env_data = fetch_environment_snapshot(apiary.latitude, apiary.longitude)
+        db.add(EnvironmentalData(
+            batch_id=batch.id,
+            temperature=env_data["temperature"],
+            humidity=env_data["humidity"],
+            rainfall=env_data["rainfall"],
+            pressure=env_data["pressure"],
+            cloud_cover=env_data["cloud_cover"],
+            wind_speed=env_data["wind_speed"],
+            weather_source=env_data["weather_source"],
+        ))
+    except Exception:
+        # Env snapshot is non-fatal — the batch is on chain, that's the source of truth.
+        logger.exception("Environmental snapshot fetch failed for batch %s", batch_id_hex)
 
+    _commit_or_orphan(db, batch_id_hex, harvest_tx)
     db.refresh(batch)
-
-    # -------------------------
-    # FETCH ENVIRONMENT DATA
-    # -------------------------
-
-    env_data = fetch_environment_snapshot(
-        apiary.latitude,
-        apiary.longitude
-    )
-
-    environmental_record = EnvironmentalData(
-        batch_id=batch.id,
-
-        temperature=env_data["temperature"],
-
-        humidity=env_data["humidity"],
-
-        rainfall=env_data["rainfall"],
-
-        pressure=env_data["pressure"],
-
-        cloud_cover=env_data["cloud_cover"],
-
-        wind_speed=env_data["wind_speed"],
-
-        weather_source=env_data["weather_source"],
-    )
-
-    db.add(environmental_record)
-
-    db.commit()
-
-    db.refresh(batch)
-
     return batch
-
-
-@router.get("/simple/all", response_model=list[BatchResponse])
-def get_simple_batches(
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
-):
-    """
-    Get all batches (including simple frontend ones)
-    """
-
-    batches = db.query(HoneyBatch).order_by(HoneyBatch.created_at.desc()).all()
-    return batches
