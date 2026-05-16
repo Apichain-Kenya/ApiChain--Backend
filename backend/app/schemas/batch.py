@@ -172,11 +172,12 @@ class EnvironmentalDataPublic(BaseModel):
         from_attributes = True
 
 
-class LabHashVerification(BaseModel):
+class StageHashVerification(BaseModel):
     """Three-way comparison between DB-stored hash, on-chain hash, and a
     freshly-recomputed keccak256 of the persisted row.
 
     `match` is true only when all three agree and the chain hash is non-zero.
+    Shared across all 5 lifecycle stages (harvest/process/lab/packaging/distribution).
     """
     db_hash: str
     chain_hash: str
@@ -184,8 +185,72 @@ class LabHashVerification(BaseModel):
     match: bool
 
 
+# Backwards-compatibility alias — `LabHashVerification` was the Sprint 4 name
+# when only the lab stage carried structured rows. Existing imports keep working.
+LabHashVerification = StageHashVerification
+
+
 class VerificationBlock(BaseModel):
-    lab: Optional[LabHashVerification] = None
+    """Per-stage hash verification. Each field is populated only when the
+    corresponding `*_records` row exists for the batch (i.e. the stage has
+    been executed)."""
+    harvest: Optional[StageHashVerification] = None
+    process: Optional[StageHashVerification] = None
+    lab: Optional[StageHashVerification] = None
+    packaging: Optional[StageHashVerification] = None
+    distribution: Optional[StageHashVerification] = None
+
+
+class HarvestRecordPublic(BaseModel):
+    batch_id: int
+    harvest_date: Optional[datetime] = None
+    quantity_kg: float
+    hive_ids: list[str]
+    gps_lat: Optional[float] = None
+    gps_lon: Optional[float] = None
+    notes: Optional[str] = None
+    harvest_proof_hash: Optional[str] = None
+    recorded_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ProcessRecordPublic(BaseModel):
+    batch_id: int
+    extraction_method: str
+    moisture_content: Optional[float] = None
+    handling_notes: Optional[str] = None
+    process_proof_hash: Optional[str] = None
+    recorded_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class PackagingRecordPublic(BaseModel):
+    batch_id: int
+    unit_count: int
+    jar_ids: list[str]
+    qr_codes: list[str]
+    notes: Optional[str] = None
+    packaging_proof_hash: Optional[str] = None
+    recorded_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class DistributionRecordPublic(BaseModel):
+    batch_id: int
+    retailer_name: str
+    transport_reference: Optional[str] = None
+    handover_notes: Optional[str] = None
+    distribution_proof_hash: Optional[str] = None
+    recorded_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 
 
 class TxHashes(BaseModel):
@@ -208,6 +273,10 @@ class BatchVerifyResponse(BaseModel):
     timeline: BatchTimelineResponse
     hashes: BatchHashesResponse
     lab_result: Optional[LabResultPublic] = None
+    harvest_record: Optional[HarvestRecordPublic] = None
+    process_record: Optional[ProcessRecordPublic] = None
+    packaging_record: Optional[PackagingRecordPublic] = None
+    distribution_record: Optional[DistributionRecordPublic] = None
     environmental_data: Optional[EnvironmentalDataPublic] = None
     verification: Optional[VerificationBlock] = None
     tx_hashes: Optional[TxHashes] = None

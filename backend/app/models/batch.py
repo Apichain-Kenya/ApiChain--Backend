@@ -65,5 +65,33 @@ class HoneyBatch(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+
+    harvest_record = relationship(
+        "HarvestRecord",
+        back_populates="batch",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+    process_record = relationship(
+        "ProcessRecord",
+        back_populates="batch",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+    packaging_record = relationship(
+        "PackagingRecord",
+        back_populates="batch",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+    distribution_record = relationship(
+        "DistributionRecord",
+        back_populates="batch",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
     #prediction = relationship("PredictionResult", back_populates="batch", uselist=False)
     #validation = relationship("ValidationResult", back_populates="batch", uselist=False)

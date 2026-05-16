@@ -270,15 +270,32 @@ def run(base_url: str, invite_code: str) -> int:
         )
 
         verification = verify_resp.get("verification") or {}
-        lab_v = verification.get("lab") or {}
-        _assert(
-            lab_v.get("match") is True,
-            f"verification.lab.match is not True: {lab_v}",
-        )
-        _assert(
-            lab_v.get("recomputed_hash") == lab_v.get("db_hash") == lab_v.get("chain_hash"),
-            f"three-way hash mismatch in verification.lab: {lab_v}",
-        )
+
+        # Sprint 5: all 5 mutating stages now carry a structured proof hash.
+        # `/verify.match` must be True for every stage that has occurred.
+        for stage in ("harvest", "process", "lab", "packaging", "distribution"):
+            block = verification.get(stage) or {}
+            _assert(
+                block.get("match") is True,
+                f"verification.{stage}.match is not True: {block}",
+            )
+            _assert(
+                block.get("recomputed_hash") == block.get("db_hash") == block.get("chain_hash"),
+                f"three-way hash mismatch in verification.{stage}: {block}",
+            )
+
+        # Sprint 5: every stage row must be populated under /verify.
+        for record_key in (
+            "harvest_record",
+            "process_record",
+            "lab_result",
+            "packaging_record",
+            "distribution_record",
+        ):
+            _assert(
+                verify_resp.get(record_key) is not None,
+                f"{record_key} missing from /verify response",
+            )
 
         tx = verify_resp.get("tx_hashes") or {}
         for tk in ["create_tx", "harvest_tx", "process_tx", "lab_tx", "package_tx", "distribute_tx"]:

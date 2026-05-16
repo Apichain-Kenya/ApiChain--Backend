@@ -34,6 +34,7 @@ def _auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest.mark.requires_backend
 def test_full_lifecycle_walks_s0_to_s5(backend_base_url, invite_code):
     suffix = uuid.uuid4().hex[:8]
     client = httpx.Client(base_url=backend_base_url, timeout=60.0)
@@ -181,6 +182,7 @@ def test_full_lifecycle_walks_s0_to_s5(backend_base_url, invite_code):
         prev = timeline[k]
 
 
+@pytest.mark.requires_backend
 def test_wallet_less_user_cannot_sign_batch_write(backend_base_url, invite_code):
     """A user reaching a write endpoint without a wallet must get 500 with the
     'no wallet' error — confirms the admin-key fallback has been removed."""

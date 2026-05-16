@@ -38,9 +38,21 @@ def invite_code() -> str:
     return code
 
 
-@pytest.fixture(scope="session", autouse=True)
-def require_running_backend(backend_base_url):
-    """Skip lifecycle integration tests if backend/Hardhat aren't reachable."""
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "requires_backend: test needs a live backend + Hardhat RPC; auto-skips if either is unreachable",
+    )
+
+
+@pytest.fixture
+def require_running_backend(backend_base_url, request):
+    """Skip the test if backend/Hardhat aren't reachable.
+
+    Opt-in via `@pytest.mark.requires_backend`. Pure unit tests that exercise
+    hash primitives only (no HTTP, no chain) run without this fixture and stay
+    green under plain `pytest`.
+    """
     import urllib.parse
 
     parsed = urllib.parse.urlparse(backend_base_url)
@@ -53,3 +65,13 @@ def require_running_backend(backend_base_url):
     rpc_parsed = urllib.parse.urlparse(rpc)
     if not _port_reachable(rpc_parsed.hostname or "127.0.0.1", rpc_parsed.port or 8545):
         pytest.skip(f"Blockchain RPC not reachable at {rpc} — skipping integration tests")
+
+
+@pytest.fixture(autouse=True)
+def _auto_require_backend_for_marked(request):
+    """Auto-applies the backend reachability check to any test marked
+    `@pytest.mark.requires_backend`. Lets us keep the integration suite
+    behind a single decorator without re-running the port check for plain
+    unit tests."""
+    if request.node.get_closest_marker("requires_backend"):
+        request.getfixturevalue("require_running_backend")
