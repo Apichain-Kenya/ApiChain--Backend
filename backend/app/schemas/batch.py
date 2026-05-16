@@ -1,6 +1,6 @@
 from typing import Optional
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 
 # -- Request schemas --
@@ -28,21 +28,28 @@ class ProcessingRequest(BaseModel):
     handling_notes: Optional[str] = None
 
 
-class LabResults(BaseModel):
-    """Structured lab test results. Extra fields permitted for lab-specific data."""
-    model_config = ConfigDict(extra="allow")
-
-    moisture_pct: float = Field(ge=0, le=100)
-    hmf_mg_per_kg: float = Field(ge=0)
-    diastase_activity: float = Field(ge=0)
-    passed: bool
-
-
 class LabVerifyRequest(BaseModel):
-    """Data for anchoring lab proof (S2→S3). Oracle-only."""
-    lab_results: LabResults
-    verifier_name: str = Field(min_length=1)
-    file_hash: Optional[str] = None
+    """Data for anchoring lab proof (S2→S3). Oracle-signed.
+
+    Fields mirror the `lab_results` table columns so the persisted row is the
+    canonical pre-image of the on-chain proof hash. See `app/models/lab_result.py`.
+    """
+    # Lab metrics (units defined by laboratory; values are nullable so partial
+    # panels are accepted, but at least one must be present in practice).
+    moisture_content: Optional[float] = Field(default=None, ge=0, le=100)
+    sucrose_level: Optional[float] = Field(default=None, ge=0)
+    hmf_level: Optional[float] = Field(default=None, ge=0)
+    pollen_density: Optional[float] = Field(default=None, ge=0)
+    purity_score: Optional[float] = Field(default=None, ge=0, le=100)
+
+    # Required pass/fail verdict computed off-chain (by frontend or lab system).
+    passed_quality_check: bool
+
+    # Provenance metadata for the QR-verification phase.
+    laboratory_name: Optional[str] = None
+    analyst_name: Optional[str] = None
+    certificate_number: Optional[str] = None
+    notes: Optional[str] = None
 
 
 class PackagingRequest(BaseModel):
@@ -127,6 +134,71 @@ class BatchHashesResponse(BaseModel):
     distribution_hash: str
 
 
+class LabResultPublic(BaseModel):
+    """Persisted lab_results row exposed by the public verify endpoint.
+
+    Matches `_lab_result_canonical_payload(row)` plus the on-chain hash and
+    the DB-assigned `tested_at` timestamp.
+    """
+    batch_id: int
+    moisture_content: Optional[float] = None
+    sucrose_level: Optional[float] = None
+    hmf_level: Optional[float] = None
+    pollen_density: Optional[float] = None
+    purity_score: Optional[float] = None
+    passed_quality_check: bool
+    laboratory_name: Optional[str] = None
+    analyst_name: Optional[str] = None
+    certificate_number: Optional[str] = None
+    notes: Optional[str] = None
+    lab_proof_hash: Optional[str] = None
+    tested_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class EnvironmentalDataPublic(BaseModel):
+    temperature: Optional[float] = None
+    humidity: Optional[float] = None
+    rainfall: Optional[float] = None
+    wind_speed: Optional[float] = None
+    pressure: Optional[float] = None
+    cloud_cover: Optional[float] = None
+    weather_source: Optional[str] = None
+    recorded_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class LabHashVerification(BaseModel):
+    """Three-way comparison between DB-stored hash, on-chain hash, and a
+    freshly-recomputed keccak256 of the persisted row.
+
+    `match` is true only when all three agree and the chain hash is non-zero.
+    """
+    db_hash: str
+    chain_hash: str
+    recomputed_hash: str
+    match: bool
+
+
+class VerificationBlock(BaseModel):
+    lab: Optional[LabHashVerification] = None
+
+
+class TxHashes(BaseModel):
+    """The 6 anchoring tx hashes from `honey_batches`, so the scan UI can
+    deep-link each transition to Etherscan."""
+    create_tx: Optional[str] = None
+    harvest_tx: Optional[str] = None
+    process_tx: Optional[str] = None
+    lab_tx: Optional[str] = None
+    package_tx: Optional[str] = None
+    distribute_tx: Optional[str] = None
+
+
 class BatchVerifyResponse(BaseModel):
     """Public verification response (for QR scan)."""
     batch_id: str
@@ -135,6 +207,10 @@ class BatchVerifyResponse(BaseModel):
     lab_verified: bool
     timeline: BatchTimelineResponse
     hashes: BatchHashesResponse
+    lab_result: Optional[LabResultPublic] = None
+    environmental_data: Optional[EnvironmentalDataPublic] = None
+    verification: Optional[VerificationBlock] = None
+    tx_hashes: Optional[TxHashes] = None
 
 
 class SimpleBatchCreateRequest(BaseModel):

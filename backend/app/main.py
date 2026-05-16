@@ -10,8 +10,11 @@ from fastapi.security import HTTPBearer
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app import database
-from app.routers import auth, farmers, user, batch, environmental, lab_results
+from app.routers import auth, farmers, user, batch, environmental
 # aggregator router deprecated after 2026-04-12 pivot; see aggregator.py docstring.
+# lab_results router removed in Sprint 3 (2026-05-16) — the canonical
+# oracle-signed path is POST /batches/{id}/lab-verify, which also persists
+# the lab_results row. See routers/batch.py.
 app = FastAPI()
 
 security = HTTPBearer()
@@ -41,7 +44,6 @@ app.include_router(farmers.router)
 app.include_router(user.router)
 app.include_router(batch.router)
 app.include_router(environmental.router)
-app.include_router(lab_results.router)
 # app.include_router(aggregator.router)  # deprecated, see aggregator.py
 
 

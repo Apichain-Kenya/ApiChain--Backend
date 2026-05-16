@@ -50,6 +50,12 @@ class LabResult(Base):
         default=lambda: datetime.now(timezone.utc)
     )
 
+    # Hash that was anchored on chain via `anchorLabProof(batchId, proofHash)`.
+    # Stored here so the QR-verification phase can: (a) re-hash the persisted
+    # row and confirm it matches this value, and (b) compare this value against
+    # the chain's `getBatch.labProofHash`. Hex string with 0x prefix.
+    lab_proof_hash = Column(String, nullable=True, index=True)
+
     batch = relationship(
         "HoneyBatch",
         back_populates="lab_result"

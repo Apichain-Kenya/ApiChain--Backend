@@ -200,14 +200,13 @@ def run(base_url: str, invite_code: str) -> int:
             "password": employee_credentials["lab_test_officer"]["password"],
         })["access_token"]
         lab_resp = _post(client, f"/batches/{batch_id}/lab-verify", {
-            "lab_results": {
-                "moisture_pct": 18.2,
-                "hmf_mg_per_kg": 12.0,
-                "diastase_activity": 9.5,
-                "passed": True,
-            },
-            "verifier_name": "KEBS Lab #1",
-            "file_hash": "abcd1234",
+            "moisture_content": 18.2,
+            "hmf_level": 12.0,
+            "purity_score": 95.5,
+            "passed_quality_check": True,
+            "laboratory_name": "KEBS Lab #1",
+            "analyst_name": "Sprint3 E2E",
+            "certificate_number": "abcd1234",
         }, headers=_auth(lab_token))
         _assert(lab_resp["new_state"] == "LAB_VERIFIED", f"expected LAB_VERIFIED, got {lab_resp['new_state']}")
         rows.append(("LAB_VERIFY", "lab_test_officer (oracle)", lab_resp["tx_hash"], 0))
@@ -258,6 +257,39 @@ def run(base_url: str, invite_code: str) -> int:
             _assert(v and v != "0x" + "00" * 32, f"hash {hk} is zero/missing: {v}")
         for tk in ["created_at", "harvested_at", "processed_at", "lab_verified_at", "packaged_at", "distributed_at"]:
             _assert(timeline[tk] > 0, f"timestamp {tk} is zero: {timeline[tk]}")
+
+        # Sprint 4: /verify now joins persisted lab_results + the 6 anchoring
+        # tx hashes and includes a three-way hash match. The scan UI gates
+        # the green "Blockchain Verified" badge on `verification.lab.match`.
+        lab_result = verify_resp.get("lab_result")
+        _assert(lab_result is not None, "lab_result missing from /verify response")
+        _assert(
+            lab_result.get("lab_proof_hash") == hashes["lab_proof_hash"],
+            f"lab_result.lab_proof_hash ({lab_result.get('lab_proof_hash')}) "
+            f"!= on-chain lab_proof_hash ({hashes['lab_proof_hash']})",
+        )
+
+        verification = verify_resp.get("verification") or {}
+        lab_v = verification.get("lab") or {}
+        _assert(
+            lab_v.get("match") is True,
+            f"verification.lab.match is not True: {lab_v}",
+        )
+        _assert(
+            lab_v.get("recomputed_hash") == lab_v.get("db_hash") == lab_v.get("chain_hash"),
+            f"three-way hash mismatch in verification.lab: {lab_v}",
+        )
+
+        tx = verify_resp.get("tx_hashes") or {}
+        for tk in ["create_tx", "harvest_tx", "process_tx", "lab_tx", "package_tx", "distribute_tx"]:
+            _assert(tx.get(tk), f"tx_hashes.{tk} missing in /verify response: {tx}")
+
+        # environmental_data is optional in this flow — /batches/ (used here)
+        # doesn't trigger the env snapshot; /batches/simple does. Log it.
+        if verify_resp.get("environmental_data"):
+            logger.info("environmental_data present in /verify (snapshot was fetched)")
+        else:
+            logger.info("environmental_data absent in /verify (expected — /batches/ path doesn't fetch snapshot)")
 
         # Backfill block timestamps into rows for the summary table
         ts_keys = ["created_at", "harvested_at", "processed_at", "lab_verified_at", "packaged_at", "distributed_at"]

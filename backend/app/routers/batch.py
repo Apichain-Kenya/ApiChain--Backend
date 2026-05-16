@@ -18,6 +18,7 @@ from app.deps import get_current_user, require_roles
 from app.models.batch import HoneyBatch
 from app.models.environmental_data import EnvironmentalData
 from app.models.apiary import ApiaryLocation
+from app.models.lab_result import LabResult
 from app.schemas.batch import (
     BatchCreateRequest,
     BatchResponse,
@@ -26,11 +27,16 @@ from app.schemas.batch import (
     BatchTimelineResponse,
     BatchVerifyResponse,
     DistributionRequest,
+    EnvironmentalDataPublic,
     HarvestRequest,
+    LabHashVerification,
+    LabResultPublic,
     LabVerifyRequest,
     PackagingRequest,
     ProcessingRequest,
     SimpleBatchCreateRequest,
+    TxHashes,
+    VerificationBlock,
 )
 from app.models.eth_wallet import EthWallet
 from app.services.blockchain import blockchain_service
@@ -295,6 +301,50 @@ def record_processing(
 # Anchor lab proof (S2 → S3) — Oracle only
 # ------------------------------------------------------------------
 
+def _lab_result_canonical_payload(row: LabResult) -> dict:
+    """Build the deterministic pre-image dict used for `proofHash`.
+
+    The persisted row is the single source of truth — re-running this on the
+    DB row at QR-verification time must reproduce the exact bytes that were
+    hashed at lab-verify time. Only stable, oracle-anchored columns are
+    included; `id`, `tested_at`, and `lab_proof_hash` are excluded (the first
+    two are DB-assigned post-hash; the third IS the hash).
+    """
+    return {
+        "batch_id": row.batch_id,
+        "moisture_content": row.moisture_content,
+        "sucrose_level": row.sucrose_level,
+        "hmf_level": row.hmf_level,
+        "pollen_density": row.pollen_density,
+        "purity_score": row.purity_score,
+        "passed_quality_check": row.passed_quality_check,
+        "laboratory_name": row.laboratory_name,
+        "analyst_name": row.analyst_name,
+        "certificate_number": row.certificate_number,
+        "notes": row.notes,
+    }
+
+
+def _verify_lab_hash(row: LabResult, chain_hash_hex: str) -> dict:
+    """Three-way comparison between the DB-stored hash, the on-chain hash, and a
+    freshly-recomputed keccak256 of the persisted row.
+
+    `match` is true only when all three agree AND the chain hash is non-zero
+    (a zero-hash means lab verification was never anchored).
+    """
+    payload = _lab_result_canonical_payload(row)
+    recomputed = "0x" + blockchain_service.compute_data_hash(payload).hex()
+    db = (row.lab_proof_hash or "").lower()
+    chain = (chain_hash_hex or "").lower()
+    zero = "0x" + ("00" * 32)
+    return {
+        "db_hash": db,
+        "chain_hash": chain,
+        "recomputed_hash": recomputed.lower(),
+        "match": recomputed.lower() == db == chain and chain != zero,
+    }
+
+
 @router.post("/{batch_id}/lab-verify", response_model=BatchTransitionResponse)
 def anchor_lab_proof(
     batch_id: str,
@@ -302,11 +352,16 @@ def anchor_lab_proof(
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles(["lab_test_officer", "admin", "super_admin"])),
 ):
-    """Anchor lab verification proof.
+    """Anchor lab verification proof (S2→S3).
 
     Signs with the system oracle key, deliberately bypassing
     `_get_user_signing_key()` — ORACLE_ROLE is one trusted EOA, not a user
     identity. See `blockchain_service.anchor_lab_proof` for details.
+
+    Flow: validate state → INSERT lab_results row (flushed but uncommitted) →
+    hash the persisted row → anchor on chain → store hash on row + tx on
+    batch → commit. If the chain call fails, the inserted row is rolled back
+    so no unanchored lab result is persisted.
     """
     _check_blockchain()
 
@@ -318,18 +373,34 @@ def anchor_lab_proof(
     if batch.current_state != "PROCESSED":
         raise HTTPException(status_code=400, detail=f"Batch is in state {batch.current_state}, expected PROCESSED")
 
-    proof_payload = data.model_dump()
+    existing = db.query(LabResult).filter(LabResult.batch_id == batch.id).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Lab result already exists for this batch")
+
+    # Insert + flush so DB-assigned columns (id, tested_at) are populated, but
+    # do NOT commit until the chain anchor succeeds.
+    row = LabResult(batch_id=batch.id, **data.model_dump())
+    db.add(row)
+    db.flush()
+
+    proof_payload = _lab_result_canonical_payload(row)
     proof_hash = blockchain_service.compute_data_hash(proof_payload)
     batch_id_bytes = _batch_id_to_bytes(batch_id)
 
     try:
         tx_hash, block_ts = blockchain_service.anchor_lab_proof(batch_id_bytes, proof_hash)
     except ContractLogicError as e:
+        db.rollback()
         raise HTTPException(status_code=400, detail=f"Contract error: {e}")
     except Exception as e:
+        db.rollback()
         logger.error(f"Blockchain error in anchor_lab_proof: {e}")
         raise HTTPException(status_code=502, detail="Blockchain transaction failed")
 
+    row.lab_proof_hash = "0x" + proof_hash.hex()
+    # Keep the legacy JSON blob for backward-compat with consumers reading
+    # honey_batches.lab_proof_data; the structured lab_results row is the
+    # canonical source going forward.
     batch.lab_proof_data = proof_payload
     batch.current_state = "LAB_VERIFIED"
     batch.lab_verify_tx_hash = tx_hash
@@ -512,10 +583,16 @@ def get_batch_hashes(batch_id: str):
 
 
 @router.get("/{batch_id}/verify", response_model=BatchVerifyResponse)
-def verify_batch(batch_id: str):
-    """
-    Public batch verification endpoint (for QR scan).
-    No authentication required. Reads directly from blockchain.
+def verify_batch(batch_id: str, db: Session = Depends(get_db)):
+    """Public batch verification endpoint (for QR scan).
+
+    No authentication required. Reads on-chain state and joins the persisted
+    `lab_results` and `environmental_data` rows when present. When a lab row
+    exists, also returns a three-way hash comparison: recomputed pre-image hash
+    of the persisted row vs. `lab_results.lab_proof_hash` vs. on-chain
+    `getBatch().labProofHash`. The scan UI shows the green "Blockchain
+    Verified" badge only when state == DISTRIBUTED and `verification.lab.match`
+    is true.
     """
     _check_blockchain()
 
@@ -528,6 +605,36 @@ def verify_batch(batch_id: str):
     except ContractLogicError as e:
         raise HTTPException(status_code=404, detail=f"Batch not found on chain: {e}")
 
+    batch = db.query(HoneyBatch).filter(
+        HoneyBatch.blockchain_batch_id == batch_id
+    ).first()
+
+    lab_public: LabResultPublic | None = None
+    env_public: EnvironmentalDataPublic | None = None
+    verification: VerificationBlock | None = None
+    tx_hashes: TxHashes | None = None
+
+    if batch is not None:
+        tx_hashes = TxHashes(
+            create_tx=batch.create_tx_hash,
+            harvest_tx=batch.harvest_tx_hash,
+            process_tx=batch.process_tx_hash,
+            lab_tx=batch.lab_verify_tx_hash,
+            package_tx=batch.packaging_tx_hash,
+            distribute_tx=batch.distribution_tx_hash,
+        )
+
+        if batch.lab_result is not None:
+            lab_public = LabResultPublic.model_validate(batch.lab_result)
+            verification = VerificationBlock(
+                lab=LabHashVerification(
+                    **_verify_lab_hash(batch.lab_result, hashes["lab_proof_hash"])
+                )
+            )
+
+        if batch.environmental_data is not None:
+            env_public = EnvironmentalDataPublic.model_validate(batch.environmental_data)
+
     return BatchVerifyResponse(
         batch_id=batch_id,
         state=batch_data["state"],
@@ -535,6 +642,10 @@ def verify_batch(batch_id: str):
         lab_verified=batch_data["lab_verified"],
         timeline=BatchTimelineResponse(batch_id=batch_id, **timeline),
         hashes=BatchHashesResponse(batch_id=batch_id, **hashes),
+        lab_result=lab_public,
+        environmental_data=env_public,
+        verification=verification,
+        tx_hashes=tx_hashes,
     )
 
 
