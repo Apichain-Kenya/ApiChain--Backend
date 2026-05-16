@@ -258,6 +258,39 @@ def run(base_url: str, invite_code: str) -> int:
         for tk in ["created_at", "harvested_at", "processed_at", "lab_verified_at", "packaged_at", "distributed_at"]:
             _assert(timeline[tk] > 0, f"timestamp {tk} is zero: {timeline[tk]}")
 
+        # Sprint 4: /verify now joins persisted lab_results + the 6 anchoring
+        # tx hashes and includes a three-way hash match. The scan UI gates
+        # the green "Blockchain Verified" badge on `verification.lab.match`.
+        lab_result = verify_resp.get("lab_result")
+        _assert(lab_result is not None, "lab_result missing from /verify response")
+        _assert(
+            lab_result.get("lab_proof_hash") == hashes["lab_proof_hash"],
+            f"lab_result.lab_proof_hash ({lab_result.get('lab_proof_hash')}) "
+            f"!= on-chain lab_proof_hash ({hashes['lab_proof_hash']})",
+        )
+
+        verification = verify_resp.get("verification") or {}
+        lab_v = verification.get("lab") or {}
+        _assert(
+            lab_v.get("match") is True,
+            f"verification.lab.match is not True: {lab_v}",
+        )
+        _assert(
+            lab_v.get("recomputed_hash") == lab_v.get("db_hash") == lab_v.get("chain_hash"),
+            f"three-way hash mismatch in verification.lab: {lab_v}",
+        )
+
+        tx = verify_resp.get("tx_hashes") or {}
+        for tk in ["create_tx", "harvest_tx", "process_tx", "lab_tx", "package_tx", "distribute_tx"]:
+            _assert(tx.get(tk), f"tx_hashes.{tk} missing in /verify response: {tx}")
+
+        # environmental_data is optional in this flow — /batches/ (used here)
+        # doesn't trigger the env snapshot; /batches/simple does. Log it.
+        if verify_resp.get("environmental_data"):
+            logger.info("environmental_data present in /verify (snapshot was fetched)")
+        else:
+            logger.info("environmental_data absent in /verify (expected — /batches/ path doesn't fetch snapshot)")
+
         # Backfill block timestamps into rows for the summary table
         ts_keys = ["created_at", "harvested_at", "processed_at", "lab_verified_at", "packaged_at", "distributed_at"]
         rows = [(stage, role, tx, timeline[ts_keys[i]]) for i, (stage, role, tx, _) in enumerate(rows)]
