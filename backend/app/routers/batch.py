@@ -222,7 +222,6 @@ def create_batch(
         blockchain_batch_id=batch_id_hex,
         farmer_id=farmer_id,
         apiary_id=apiary.id,
-        apiary_data=None,   # legacy mirror, structured row is canonical now
         metadata_payload=data.metadata,
         current_state="CREATED",
     )
@@ -342,8 +341,6 @@ def record_harvest(
         raise HTTPException(status_code=502, detail="Blockchain transaction failed")
 
     row.harvest_proof_hash = "0x" + harvest_hash.hex()
-    # Legacy mirror for one-sprint rollback window; dropped in Sprint 6.
-    batch.harvest_data = harvest_payload
     batch.current_state = "HARVESTED"
     batch.harvest_tx_hash = tx_hash
     batch.harvested_at = datetime.fromtimestamp(block_ts, tz=timezone.utc)
@@ -413,7 +410,6 @@ def record_processing(
         raise HTTPException(status_code=502, detail="Blockchain transaction failed")
 
     row.process_proof_hash = "0x" + process_hash.hex()
-    batch.process_data = process_payload
     batch.current_state = "PROCESSED"
     batch.process_tx_hash = tx_hash
     batch.processed_at = datetime.fromtimestamp(block_ts, tz=timezone.utc)
@@ -661,10 +657,6 @@ def anchor_lab_proof(
         raise HTTPException(status_code=502, detail="Blockchain transaction failed")
 
     row.lab_proof_hash = "0x" + proof_hash.hex()
-    # Keep the legacy JSON blob for backward-compat with consumers reading
-    # honey_batches.lab_proof_data; the structured lab_results row is the
-    # canonical source going forward.
-    batch.lab_proof_data = proof_payload
     batch.current_state = "LAB_VERIFIED"
     batch.lab_verify_tx_hash = tx_hash
     batch.lab_verified_at = datetime.fromtimestamp(block_ts, tz=timezone.utc)
@@ -735,7 +727,6 @@ def record_packaging(
         raise HTTPException(status_code=502, detail="Blockchain transaction failed")
 
     row.packaging_proof_hash = "0x" + packaging_hash.hex()
-    batch.packaging_data = packaging_payload
     batch.current_state = "PACKAGED"
     batch.packaging_tx_hash = tx_hash
     batch.packaged_at = datetime.fromtimestamp(block_ts, tz=timezone.utc)
@@ -805,7 +796,6 @@ def record_distribution(
         raise HTTPException(status_code=502, detail="Blockchain transaction failed")
 
     row.distribution_proof_hash = "0x" + dist_hash.hex()
-    batch.distribution_data = dist_payload
     batch.current_state = "DISTRIBUTED"
     batch.distribution_tx_hash = tx_hash
     batch.distributed_at = datetime.fromtimestamp(block_ts, tz=timezone.utc)
@@ -1038,7 +1028,6 @@ def create_simple_batch(
         blockchain_batch_id=batch_id_hex,
         farmer_id=farmer_id,
         apiary_id=apiary.id,
-        apiary_data=None,
         metadata_payload=metadata_payload,
         harvest_date=data.harvest_date,
         quantity=data.quantity_kg,
@@ -1126,7 +1115,6 @@ def create_simple_batch(
         )
 
     harvest_row.harvest_proof_hash = "0x" + harvest_hash.hex()
-    batch.harvest_data = harvest_payload
     batch.harvest_tx_hash = harvest_tx
     batch.harvested_at = datetime.fromtimestamp(harvest_block_ts, tz=timezone.utc)
 

@@ -24,14 +24,11 @@ class HoneyBatch(Base):
     quantity = Column(Float, nullable=True)
     # CREATED → HARVESTED → PROCESSED → LAB_VERIFIED → PACKAGED → DISTRIBUTED
 
-    #  Blockchain payloads (off-chain storage)
-    apiary_data = Column(JSON, nullable=True)
+    # metadata_payload is the only remaining off-chain blob; the five legacy
+    # *_data JSON columns were dropped in Sprint 7 (migration f7012345abcd)
+    # once every stage had a structured row + *_proof_hash. Metadata stays
+    # free-form until the Sprint 8 schema rewrite (backlog #1).
     metadata_payload = Column(JSON, nullable=True)
-    harvest_data = Column(JSON, nullable=True)
-    process_data = Column(JSON, nullable=True)
-    lab_proof_data = Column(JSON, nullable=True)
-    packaging_data = Column(JSON, nullable=True)
-    distribution_data = Column(JSON, nullable=True)
 
     # State mirror (blockchain)
     current_state = Column(String, default="CREATED", nullable=False)
