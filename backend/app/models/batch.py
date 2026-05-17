@@ -66,6 +66,13 @@ class HoneyBatch(Base):
         cascade="all, delete-orphan",
     )
 
+    apiary_record = relationship(
+        "ApiaryRecord",
+        back_populates="batch",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
     harvest_record = relationship(
         "HarvestRecord",
         back_populates="batch",

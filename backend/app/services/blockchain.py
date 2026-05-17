@@ -11,15 +11,80 @@ Stage 2: Will switch to per-user wallet signing.
 
 import json
 import os
+import time
 import uuid
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from web3 import Web3
-from web3.exceptions import ContractLogicError
+from web3.exceptions import ContractLogicError, TimeExhausted
 
 logger = logging.getLogger(__name__)
+
+
+class ReceiptPendingError(Exception):
+    """Raised when a transaction was successfully broadcast but its receipt
+    did not arrive within the configured ceiling.
+
+    Distinct from a generic Exception so callers in `routers/batch.py` can
+    treat it as "anchor in flight" rather than "anchor failed": persist the
+    tx hash, leave DB state unchanged, return HTTP 202, and let the
+    `reconcile_pending_batches` scheduler job finish the job once the tx
+    confirms.
+    """
+
+    def __init__(self, tx_hash: str):
+        super().__init__(f"Transaction broadcast but receipt pending: {tx_hash}")
+        self.tx_hash = tx_hash
+
+
+# Retry tuning. Kept module-level so tests can monkeypatch a tighter cadence.
+RPC_RETRY_ATTEMPTS = 3
+RPC_RETRY_INITIAL_DELAY_S = 0.5
+RPC_RETRY_MAX_DELAY_S = 4.0
+RECEIPT_CEILING_S = 90
+RECEIPT_POLL_INITIAL_S = 1.0
+RECEIPT_POLL_MAX_S = 8.0
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Classify whether an exception should trigger a retry.
+
+    Deterministic reverts (`ContractLogicError`) are never retried — the
+    contract said no, retrying will just say no again. Everything else
+    (connection reset, 5xx from the RPC, socket timeout) is treated as
+    transient.
+    """
+    if isinstance(exc, ContractLogicError):
+        return False
+    return True
+
+
+def _retry_rpc(fn: Callable, *args, **kwargs):
+    """Bounded exponential-backoff retry for a single RPC call.
+
+    Not a decorator on purpose — `_sign_and_send` mixes nonce-fetch,
+    build, sign, broadcast, and receipt-wait, and we only want retries
+    around the truly transient hops (connection + broadcast), not the
+    whole compound operation.
+    """
+    delay = RPC_RETRY_INITIAL_DELAY_S
+    last_exc: Optional[BaseException] = None
+    for attempt in range(1, RPC_RETRY_ATTEMPTS + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if not _is_transient(exc) or attempt == RPC_RETRY_ATTEMPTS:
+                raise
+            last_exc = exc
+            logger.warning(
+                f"RPC call failed (attempt {attempt}/{RPC_RETRY_ATTEMPTS}): {exc!r} — retrying in {delay}s"
+            )
+            time.sleep(delay)
+            delay = min(delay * 2, RPC_RETRY_MAX_DELAY_S)
+    # Unreachable, but keeps type-checkers happy.
+    raise last_exc  # type: ignore[misc]
 
 # BatchState enum values matching the Solidity contract
 BATCH_STATES = {
@@ -114,13 +179,43 @@ class BlockchainService:
 
     @property
     def is_connected(self) -> bool:
-        # TODO(sprint-2): transient RPC failures here 503 every batch endpoint
-        # at once. Add a short-window retry or circuit-breaker before relying
-        # on this in production.
+        """Bounded-retry connectivity check.
+
+        Sprint 6: transient RPC blips (Sepolia load balancer hiccups, brief
+        socket resets) used to 503 every batch endpoint at once. The retry
+        absorbs the most common failure mode without masking a genuine
+        outage — three attempts with exponential backoff returns False fast
+        enough not to wedge the request thread.
+        """
         try:
-            return self.w3.is_connected()
+            return _retry_rpc(self.w3.is_connected)
         except Exception:
             return False
+
+    def _wait_for_receipt(self, tx_hash, ceiling_s: int = RECEIPT_CEILING_S):
+        """Poll for a transaction receipt with exponential backoff up to
+        `ceiling_s` seconds.
+
+        Sprint 4 Sepolia evidence (docs/sepolia-lifecycle-evidence.md L126)
+        showed the old hardcoded 30s `wait_for_transaction_receipt` firing
+        prematurely on DISTRIBUTE even though the tx confirmed seconds later.
+        90s covers the Sepolia long tail; locally on Hardhat the first poll
+        succeeds.
+
+        Raises:
+            ReceiptPendingError: ceiling exceeded with no receipt observed.
+        """
+        deadline = time.monotonic() + ceiling_s
+        poll = RECEIPT_POLL_INITIAL_S
+        while True:
+            try:
+                # Web3 raises TimeExhausted when its internal timeout hits;
+                # we want to keep polling until OUR ceiling hits.
+                return self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=poll)
+            except TimeExhausted:
+                if time.monotonic() >= deadline:
+                    raise ReceiptPendingError(tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash))
+                poll = min(poll * 2, RECEIPT_POLL_MAX_S)
 
     # ------------------------------------------------------------------
     # Account funding (for dev/testnet -- new wallets start with 0 ETH)
@@ -154,10 +249,16 @@ class BlockchainService:
                 "chainId": self.chain_id,
             }
             signed = self.w3.eth.account.sign_transaction(tx, self.admin_key)
-            tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
-            self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+            tx_hash = _retry_rpc(self.w3.eth.send_raw_transaction, signed.raw_transaction)
+            self._wait_for_receipt(tx_hash)
             logger.info(f"Funded {address} with {amount_eth} ETH (tx: {tx_hash.hex()})")
             return tx_hash.hex()
+        except ReceiptPendingError as e:
+            # Funding receipts are non-critical; the wallet may still be
+            # usable on the next request once the tx confirms. Surface the
+            # tx hash for operator visibility but don't fail enrollment.
+            logger.warning(f"Funding tx pending for {address}: {e.tx_hash}")
+            return e.tx_hash
         except Exception as e:
             logger.error(f"Failed to fund {address}: {e}")
             return None
@@ -197,8 +298,12 @@ class BlockchainService:
         )
 
         signed = self.w3.eth.account.sign_transaction(tx, private_key)
-        tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
-        receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=30)
+        # Retry only the broadcast hop: nonce-fetch and build above are
+        # cheap to re-run on a retry up here, but the receipt-wait below
+        # is governed by its own ceiling and must not be retried (that
+        # would re-broadcast the same tx and waste gas).
+        tx_hash = _retry_rpc(self.w3.eth.send_raw_transaction, signed.raw_transaction)
+        receipt = self._wait_for_receipt(tx_hash)
 
         if receipt["status"] != 1:
             raise Exception(f"Transaction reverted: {tx_hash.hex()}")
