@@ -285,8 +285,17 @@ def upload_document(
     farmer_id: int,
     doc_type: str,
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
 ):
+    # Sprint 7: was publicly writable — any unauthenticated caller could
+    # overwrite a farmer's documents given the pseudo-random farmer_id.
+    role = current_user["role"]
+    if role not in ("farmer", "on_ground_officer", "admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    if role == "farmer" and current_user["user_id"] != farmer_id:
+        raise HTTPException(status_code=403, detail="Farmers may only upload to their own profile")
+
     farmer = db.query(Farmer).filter(Farmer.id == farmer_id).first()
     if not farmer:
         raise HTTPException(status_code=404, detail="Farmer not found")
