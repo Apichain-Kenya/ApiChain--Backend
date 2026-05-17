@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run unit test suite
+        env:
+          # Stub values — unit tests do NOT hit the chain or DB. They only
+          # need module-level imports (services/blockchain.py +
+          # services/encryption.py) to succeed. Integration tests are
+          # marker-gated (`-m "not requires_backend"`) and remain off in CI
+          # until we wire a hardhat + postgres service stack.
+          WALLET_ENCRYPTION_KEY: "fnxRA52qDOmDtO8O7zEJzVqHr1qFTQI2x0z0vGy7Yqg="
+          DATABASE_URL: "sqlite:///./ci_dummy.db"
+          SECRET_KEY: "ci-secret-not-for-production"
+          ALGORITHM: "HS256"
+          ACCESS_TOKEN_EXPIRE_MINUTES: "30"
+          BLOCKCHAIN_RPC_URL: "http://127.0.0.1:8545"
+          ADMIN_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+          ORACLE_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+          ROLE_MANAGER_ADDRESS: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+          REGISTRY_ADDRESS: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+          CHAIN_ID: "31337"
+        run: pytest -q -m "not requires_backend"
