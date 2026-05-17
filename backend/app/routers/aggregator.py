@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 # FIX: Import shared get_db from database.py instead of duplicating it here.
 from app.database import get_db
+from app.deps import get_current_user
 from app.models.aggregator import Aggregator
 from app.schemas.aggregator import AggregatorCreate, AggregatorLogin, AggregatorDetails
 from app.auth import hash_password, verify_password, create_access_token
@@ -26,8 +27,22 @@ from shapely.geometry import Point
 router = APIRouter(prefix="/aggregators", tags=["Aggregators (deprecated)"])
 
 
+# Sprint 7: even though this router is no longer included in main.py, both
+# mutating endpoints are JWT-guarded as defense-in-depth in case the router
+# is ever re-registered. Removal of the whole router + table is tracked
+# separately (Tier 2 #8).
+_AGG_ADMIN_ROLES = ("admin", "super_admin")
+
+
 @router.post("/details/{agg_id}")
-def add_details(agg_id: int, data: AggregatorDetails, db: Session = Depends(get_db)):
+def add_details(
+    agg_id: int,
+    data: AggregatorDetails,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    if current_user["role"] not in _AGG_ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail="Unauthorized")
     agg = db.query(Aggregator).filter(Aggregator.id == agg_id).first()
     if not agg:
         raise HTTPException(status_code=404, detail="Aggregator not found")
@@ -74,7 +89,15 @@ UPLOAD_DIR = "uploads/aggregators"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @router.post("/upload-document/{aggregator_id}")
-def upload_document(aggregator_id: int, doc_type: str, file: UploadFile = File(...), db: Session = Depends(get_db)):
+def upload_document(
+    aggregator_id: int,
+    doc_type: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    if current_user["role"] not in _AGG_ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail="Unauthorized")
     agg = db.query(Aggregator).filter(Aggregator.id == aggregator_id).first()
     if not agg:
         raise HTTPException(status_code=404, detail="Aggregator not found")

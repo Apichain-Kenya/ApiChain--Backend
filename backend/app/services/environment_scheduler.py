@@ -86,11 +86,17 @@ def _reconcile_pending_batches_job():
 
 
 def start_scheduler():
+    # Idempotent — under `uvicorn --reload` the lifespan handler can fire twice
+    # for the same process. Re-entering would raise SchedulerAlreadyRunningError.
+    if scheduler.running:
+        return
 
     scheduler.add_job(
         fetch_all_environmental_data,
         "interval",
-        hours=6
+        hours=6,
+        id="fetch_environmental_data",
+        replace_existing=True,
     )
 
     # Sprint 6: auto-recovers batches stuck in pending_confirmation after the
@@ -103,6 +109,12 @@ def start_scheduler():
         id="reconcile_pending_batches",
         max_instances=1,
         coalesce=True,
+        replace_existing=True,
     )
 
     scheduler.start()
+
+
+def stop_scheduler():
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
