@@ -75,7 +75,9 @@ def _auth(token):
 def run(base_url: str, invite_code: str) -> int:
     rows: list[tuple[str, str, str, int]] = []  # (stage, role, tx_hash, block_ts)
 
-    with httpx.Client(base_url=base_url, timeout=60.0) as client:
+    # Sprint 6: receipt-wait ceiling is 90s, so the client must wait at least
+    # that long plus DB/scheduler overhead — bumped to 180s for Sepolia.
+    with httpx.Client(base_url=base_url, timeout=180.0) as client:
         suffix = _suffix()
         logger.info("Using unique suffix %s for this run", suffix)
 
@@ -157,9 +159,21 @@ def run(base_url: str, invite_code: str) -> int:
             "password": farmer_payload["password"],
         })["access_token"]
 
-        # 6. Create batch (S0)
+        # 5b. Seed an apiary owned by the farmer (Sprint 6: POST /batches/
+        # now requires apiary_id pointing at a real apiary_locations row).
+        apiary_resp = _post(client, "/apiary-locations/", {
+            "latitude": 0.5,
+            "longitude": 36.0,
+            "altitude": 1795.0,
+            "vegetation_type": "acacia woodland",
+            "hive_count": 18,
+        }, headers=_auth(farmer_token))
+        apiary_id = apiary_resp["id"]
+        logger.info("Seeded apiary id=%s", apiary_id)
+
+        # 6. Create batch (S0) — structured apiary pre-image is anchored as apiaryHash
         create_resp = _post(client, "/batches/", {
-            "apiary_data": {"region": "Baringo", "apiary_id": f"AP-{suffix}"},
+            "apiary_id": apiary_id,
             "metadata": {"honey_type": "wildflower", "expected_yield_kg": 50},
         }, headers=_auth(farmer_token))
         batch_id = create_resp["batch_id"]
@@ -271,9 +285,9 @@ def run(base_url: str, invite_code: str) -> int:
 
         verification = verify_resp.get("verification") or {}
 
-        # Sprint 5: all 5 mutating stages now carry a structured proof hash.
-        # `/verify.match` must be True for every stage that has occurred.
-        for stage in ("harvest", "process", "lab", "packaging", "distribution"):
+        # Sprint 6: S0 apiary stage now also carries a structured proof hash,
+        # closing the symmetry across all six lifecycle stages.
+        for stage in ("apiary", "harvest", "process", "lab", "packaging", "distribution"):
             block = verification.get(stage) or {}
             _assert(
                 block.get("match") is True,
@@ -284,8 +298,10 @@ def run(base_url: str, invite_code: str) -> int:
                 f"three-way hash mismatch in verification.{stage}: {block}",
             )
 
-        # Sprint 5: every stage row must be populated under /verify.
+        # Sprint 6: apiary_record joins the family; every stage row must be
+        # populated under /verify.
         for record_key in (
+            "apiary_record",
             "harvest_record",
             "process_record",
             "lab_result",

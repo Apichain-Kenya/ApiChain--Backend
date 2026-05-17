@@ -6,9 +6,38 @@ from pydantic import BaseModel, Field, model_validator
 # -- Request schemas --
 
 class BatchCreateRequest(BaseModel):
-    """Data for creating a new honey batch (S0)."""
-    apiary_data: dict  # Apiary record (location, hive IDs, registration info)
-    metadata: dict     # Batch metadata (honey type, expected yield, notes)
+    """Data for creating a new honey batch (S0).
+
+    Sprint 6: `apiary_data` (free-form dict) replaced by `apiary_id` pointing at
+    a row in `apiary_locations`. The handler snapshots the apiary fields into
+    `apiary_records` so the canonical pre-image hash anchored on chain can be
+    reproduced verbatim at QR-verification time. `metadata` remains free-form
+    pending the stakeholder schema conversation (Sprint 7).
+    """
+    apiary_id: int
+    metadata: dict
+
+
+class ApiaryLocationCreateRequest(BaseModel):
+    """Seed an apiary owned by the authenticated farmer."""
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    altitude: Optional[float] = None
+    vegetation_type: Optional[str] = None
+    hive_count: Optional[int] = Field(default=None, ge=0)
+
+
+class ApiaryLocationPublic(BaseModel):
+    id: int
+    latitude: float
+    longitude: float
+    altitude: Optional[float] = None
+    vegetation_type: Optional[str] = None
+    hive_count: Optional[int] = None
+    farmer_id: int
+
+    class Config:
+        from_attributes = True
 
 
 class HarvestRequest(BaseModel):
@@ -194,11 +223,27 @@ class VerificationBlock(BaseModel):
     """Per-stage hash verification. Each field is populated only when the
     corresponding `*_records` row exists for the batch (i.e. the stage has
     been executed)."""
+    apiary: Optional[StageHashVerification] = None
     harvest: Optional[StageHashVerification] = None
     process: Optional[StageHashVerification] = None
     lab: Optional[StageHashVerification] = None
     packaging: Optional[StageHashVerification] = None
     distribution: Optional[StageHashVerification] = None
+
+
+class ApiaryRecordPublic(BaseModel):
+    batch_id: int
+    apiary_id: int
+    latitude: float
+    longitude: float
+    altitude: Optional[float] = None
+    vegetation_type: Optional[str] = None
+    hive_count: Optional[int] = None
+    apiary_proof_hash: Optional[str] = None
+    recorded_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 
 
 class HarvestRecordPublic(BaseModel):
@@ -273,6 +318,7 @@ class BatchVerifyResponse(BaseModel):
     timeline: BatchTimelineResponse
     hashes: BatchHashesResponse
     lab_result: Optional[LabResultPublic] = None
+    apiary_record: Optional[ApiaryRecordPublic] = None
     harvest_record: Optional[HarvestRecordPublic] = None
     process_record: Optional[ProcessRecordPublic] = None
     packaging_record: Optional[PackagingRecordPublic] = None

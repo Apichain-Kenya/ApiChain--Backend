@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from web3.exceptions import ContractLogicError
 
@@ -18,12 +19,14 @@ from app.deps import get_current_user, require_roles
 from app.models.batch import HoneyBatch
 from app.models.environmental_data import EnvironmentalData
 from app.models.apiary import ApiaryLocation
+from app.models.apiary_record import ApiaryRecord
 from app.models.lab_result import LabResult
 from app.models.harvest_record import HarvestRecord
 from app.models.process_record import ProcessRecord
 from app.models.packaging_record import PackagingRecord
 from app.models.distribution_record import DistributionRecord
 from app.schemas.batch import (
+    ApiaryRecordPublic,
     BatchCreateRequest,
     BatchResponse,
     BatchTransitionResponse,
@@ -47,7 +50,7 @@ from app.schemas.batch import (
     VerificationBlock,
 )
 from app.models.eth_wallet import EthWallet
-from app.services.blockchain import blockchain_service
+from app.services.blockchain import blockchain_service, ReceiptPendingError
 from app.services.encryption import decrypt_private_key
 from app.services.environment import fetch_environment_snapshot
 
@@ -149,6 +152,30 @@ def _commit_or_orphan(db: Session, batch_id: str, tx_hash: str) -> None:
         )
 
 
+def _pending_response(batch_id: str, tx_hash: str, stage: str) -> JSONResponse:
+    """Sprint 6 — the tx was broadcast but its receipt didn't arrive within
+    the 90 s ceiling. The DB row carries the tx hash; the reconciler job
+    will mirror chain state back in once the tx confirms.
+
+    Returns 202 Accepted, not 200, so the frontend can distinguish "anchor
+    in flight" from "anchor complete" and poll `/verify` for the eventual
+    state flip.
+    """
+    return JSONResponse(
+        status_code=202,
+        content={
+            "batch_id": batch_id,
+            "tx_hash": tx_hash,
+            "stage": stage,
+            "status": "pending_confirmation",
+            "message": (
+                "Transaction broadcast but receipt not yet observed. "
+                "Reconciler will mirror chain state once the tx confirms."
+            ),
+        },
+    )
+
+
 # ------------------------------------------------------------------
 # Create batch (S0)
 # ------------------------------------------------------------------
@@ -159,17 +186,64 @@ def create_batch(
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles(["farmer"])),
 ):
-    """Create a new honey batch on-chain. Farmer only."""
+    """Create a new honey batch on-chain (S0). Farmer only.
+
+    Sprint 6: `apiary_data` (free-form dict) is now `apiary_id` pointing at
+    a row in `apiary_locations`. The handler snapshots the apiary fields
+    into a new `apiary_records` row whose canonical payload is hashed and
+    anchored as `apiaryHash`. `metadata` remains free-form until the
+    stakeholder schema conversation lands (Sprint 7).
+    """
     _check_blockchain()
 
-    signer_key = _get_user_signing_key(db, current_user["user_id"], current_user["role"])
+    farmer_id = current_user["user_id"]
+
+    # Ownership guard — copied verbatim from POST /batches/simple so the two
+    # entry points reject the same set of cross-farmer requests.
+    apiary = db.query(ApiaryLocation).filter(
+        ApiaryLocation.id == data.apiary_id
+    ).first()
+    if not apiary:
+        raise HTTPException(status_code=404, detail="Apiary not found")
+    if apiary.farmer_id != farmer_id:
+        raise HTTPException(status_code=403, detail="Apiary does not belong to this farmer")
+
+    signer_key = _get_user_signing_key(db, farmer_id, current_user["role"])
     signer_address = blockchain_service.w3.eth.account.from_key(signer_key).address
 
-    # Generate unique batch ID
     batch_id_bytes = blockchain_service.generate_batch_id(signer_address)
+    batch_id_hex = "0x" + batch_id_bytes.hex()
 
-    # Compute hashes of off-chain data
-    apiary_hash = blockchain_service.compute_data_hash(data.apiary_data)
+    # Insert the batch + apiary_record rows first so the canonical payload is
+    # hashed from the *persisted* values (defensive against the Sprint 5
+    # TIMESTAMP-without-timezone round-trip class of bug, even though this
+    # row has no datetime column today).
+    batch = HoneyBatch(
+        blockchain_batch_id=batch_id_hex,
+        farmer_id=farmer_id,
+        apiary_id=apiary.id,
+        apiary_data=None,   # legacy mirror, structured row is canonical now
+        metadata_payload=data.metadata,
+        current_state="CREATED",
+    )
+    db.add(batch)
+    db.flush()
+
+    apiary_row = ApiaryRecord(
+        batch_id=batch.id,
+        apiary_id=apiary.id,
+        latitude=apiary.latitude,
+        longitude=apiary.longitude,
+        altitude=apiary.altitude,
+        vegetation_type=apiary.vegetation_type,
+        hive_count=apiary.hive_count,
+    )
+    db.add(apiary_row)
+    db.flush()
+    db.refresh(apiary_row)
+
+    apiary_payload = _apiary_record_canonical_payload(apiary_row)
+    apiary_hash = blockchain_service.compute_data_hash(apiary_payload)
     metadata_hash = blockchain_service.compute_data_hash(data.metadata)
 
     try:
@@ -177,26 +251,27 @@ def create_batch(
             signer_key, batch_id_bytes, apiary_hash, metadata_hash
         )
     except ContractLogicError as e:
+        db.rollback()
         raise HTTPException(status_code=400, detail=f"Contract error: {e}")
+    except ReceiptPendingError as e:
+        # Anchor in flight. Persist what we have + tx hash so the reconciler
+        # can mirror chain state back in once the tx confirms.
+        apiary_row.apiary_proof_hash = "0x" + apiary_hash.hex()
+        batch.create_tx_hash = e.tx_hash
+        _commit_or_orphan(db, batch_id_hex, e.tx_hash)
+        return _pending_response(batch_id_hex, e.tx_hash, "create")
     except Exception as e:
+        db.rollback()
         logger.error(f"Blockchain error in create_batch: {e}")
         raise HTTPException(status_code=502, detail="Blockchain transaction failed")
 
-    # Save off-chain data to database
-    batch = HoneyBatch(
-        blockchain_batch_id="0x" + batch_id_bytes.hex(),
-        farmer_id=current_user["user_id"],
-        apiary_data=data.apiary_data,
-        metadata_payload=data.metadata,
-        current_state="CREATED",
-        create_tx_hash=tx_hash,
-        created_at=datetime.fromtimestamp(block_ts, tz=timezone.utc),
-    )
-    db.add(batch)
-    _commit_or_orphan(db, "0x" + batch_id_bytes.hex(), tx_hash)
+    apiary_row.apiary_proof_hash = "0x" + apiary_hash.hex()
+    batch.create_tx_hash = tx_hash
+    batch.created_at = datetime.fromtimestamp(block_ts, tz=timezone.utc)
+    _commit_or_orphan(db, batch_id_hex, tx_hash)
 
     return BatchTransitionResponse(
-        batch_id="0x" + batch_id_bytes.hex(),
+        batch_id=batch_id_hex,
         tx_hash=tx_hash,
         new_state="CREATED",
         message="Batch created on-chain",
@@ -256,6 +331,11 @@ def record_harvest(
     except ContractLogicError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Contract error: {e}")
+    except ReceiptPendingError as e:
+        row.harvest_proof_hash = "0x" + harvest_hash.hex()
+        batch.harvest_tx_hash = e.tx_hash
+        _commit_or_orphan(db, batch_id, e.tx_hash)
+        return _pending_response(batch_id, e.tx_hash, "harvest")
     except Exception as e:
         db.rollback()
         logger.error(f"Blockchain error in record_harvest: {e}")
@@ -322,6 +402,11 @@ def record_processing(
     except ContractLogicError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Contract error: {e}")
+    except ReceiptPendingError as e:
+        row.process_proof_hash = "0x" + process_hash.hex()
+        batch.process_tx_hash = e.tx_hash
+        _commit_or_orphan(db, batch_id, e.tx_hash)
+        return _pending_response(batch_id, e.tx_hash, "process")
     except Exception as e:
         db.rollback()
         logger.error(f"Blockchain error in record_processing: {e}")
@@ -383,6 +468,24 @@ def _canonical_dt(dt) -> str | None:
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt.isoformat()
+
+
+def _apiary_record_canonical_payload(row: ApiaryRecord) -> dict:
+    """Pre-image dict for `apiaryHash` anchored at S0.
+
+    Sprint 6 — snapshot fields live on `apiary_records`, not
+    `apiary_locations`, so later edits to the underlying apiary do not
+    invalidate the anchored hash.
+    """
+    return {
+        "batch_id": row.batch_id,
+        "apiary_id": row.apiary_id,
+        "latitude": row.latitude,
+        "longitude": row.longitude,
+        "altitude": row.altitude,
+        "vegetation_type": row.vegetation_type,
+        "hive_count": row.hive_count,
+    }
 
 
 def _harvest_record_canonical_payload(row: HarvestRecord) -> dict:
@@ -456,6 +559,14 @@ def _verify_lab_hash(row: LabResult, chain_hash_hex: str) -> dict:
     return _verify_stage_hash(
         _lab_result_canonical_payload(row),
         row.lab_proof_hash,
+        chain_hash_hex,
+    )
+
+
+def _verify_apiary_hash(row: ApiaryRecord, chain_hash_hex: str) -> dict:
+    return _verify_stage_hash(
+        _apiary_record_canonical_payload(row),
+        row.apiary_proof_hash,
         chain_hash_hex,
     )
 
@@ -539,6 +650,11 @@ def anchor_lab_proof(
     except ContractLogicError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Contract error: {e}")
+    except ReceiptPendingError as e:
+        row.lab_proof_hash = "0x" + proof_hash.hex()
+        batch.lab_verify_tx_hash = e.tx_hash
+        _commit_or_orphan(db, batch_id, e.tx_hash)
+        return _pending_response(batch_id, e.tx_hash, "lab")
     except Exception as e:
         db.rollback()
         logger.error(f"Blockchain error in anchor_lab_proof: {e}")
@@ -608,6 +724,11 @@ def record_packaging(
     except ContractLogicError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Contract error: {e}")
+    except ReceiptPendingError as e:
+        row.packaging_proof_hash = "0x" + packaging_hash.hex()
+        batch.packaging_tx_hash = e.tx_hash
+        _commit_or_orphan(db, batch_id, e.tx_hash)
+        return _pending_response(batch_id, e.tx_hash, "package")
     except Exception as e:
         db.rollback()
         logger.error(f"Blockchain error in record_packaging: {e}")
@@ -673,6 +794,11 @@ def record_distribution(
     except ContractLogicError as e:
         db.rollback()
         raise HTTPException(status_code=400, detail=f"Contract error: {e}")
+    except ReceiptPendingError as e:
+        row.distribution_proof_hash = "0x" + dist_hash.hex()
+        batch.distribution_tx_hash = e.tx_hash
+        _commit_or_orphan(db, batch_id, e.tx_hash)
+        return _pending_response(batch_id, e.tx_hash, "distribute")
     except Exception as e:
         db.rollback()
         logger.error(f"Blockchain error in record_distribution: {e}")
@@ -788,6 +914,7 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
     ).first()
 
     lab_public: LabResultPublic | None = None
+    apiary_public: ApiaryRecordPublic | None = None
     harvest_public: HarvestRecordPublic | None = None
     process_public: ProcessRecordPublic | None = None
     packaging_public: PackagingRecordPublic | None = None
@@ -807,6 +934,12 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
         )
 
         v_kwargs: dict = {}
+
+        if batch.apiary_record is not None:
+            apiary_public = ApiaryRecordPublic.model_validate(batch.apiary_record)
+            v_kwargs["apiary"] = StageHashVerification(
+                **_verify_apiary_hash(batch.apiary_record, hashes["apiary_hash"])
+            )
 
         if batch.harvest_record is not None:
             harvest_public = HarvestRecordPublic.model_validate(batch.harvest_record)
@@ -852,6 +985,7 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
         timeline=BatchTimelineResponse(batch_id=batch_id, **timeline),
         hashes=BatchHashesResponse(batch_id=batch_id, **hashes),
         lab_result=lab_public,
+        apiary_record=apiary_public,
         harvest_record=harvest_public,
         process_record=process_public,
         packaging_record=packaging_public,
@@ -890,29 +1024,59 @@ def create_simple_batch(
     signer_key = _get_user_signing_key(db, farmer_id, current_user["role"])
     signer_address = blockchain_service.w3.eth.account.from_key(signer_key).address
 
-    apiary_payload = {
-        "apiary_id": apiary.id,
-        "latitude": apiary.latitude,
-        "longitude": apiary.longitude,
-        "altitude": apiary.altitude,
-        "vegetation_type": apiary.vegetation_type,
-        "hive_count": apiary.hive_count,
-    }
     metadata_payload = {"source": "simple_endpoint", "notes": data.notes}
-
-    apiary_hash = blockchain_service.compute_data_hash(apiary_payload)
     metadata_hash = blockchain_service.compute_data_hash(metadata_payload)
 
     batch_id_bytes = blockchain_service.generate_batch_id(signer_address)
     batch_id_hex = "0x" + batch_id_bytes.hex()
+
+    # Insert the batch + apiary_record rows first so the canonical payload
+    # is hashed from the persisted row, matching the Sprint 5 pattern and
+    # giving /verify the same three-way comparison the structured POST
+    # /batches/ flow provides.
+    batch = HoneyBatch(
+        blockchain_batch_id=batch_id_hex,
+        farmer_id=farmer_id,
+        apiary_id=apiary.id,
+        apiary_data=None,
+        metadata_payload=metadata_payload,
+        harvest_date=data.harvest_date,
+        quantity=data.quantity_kg,
+        current_state="CREATED",
+    )
+    db.add(batch)
+    db.flush()  # surface batch.id
+
+    apiary_row = ApiaryRecord(
+        batch_id=batch.id,
+        apiary_id=apiary.id,
+        latitude=apiary.latitude,
+        longitude=apiary.longitude,
+        altitude=apiary.altitude,
+        vegetation_type=apiary.vegetation_type,
+        hive_count=apiary.hive_count,
+    )
+    db.add(apiary_row)
+    db.flush()
+    db.refresh(apiary_row)
+
+    apiary_payload = _apiary_record_canonical_payload(apiary_row)
+    apiary_hash = blockchain_service.compute_data_hash(apiary_payload)
 
     try:
         create_tx, create_block_ts = blockchain_service.create_batch(
             signer_key, batch_id_bytes, apiary_hash, metadata_hash
         )
     except ContractLogicError as e:
+        db.rollback()
         raise HTTPException(status_code=400, detail=f"Contract error (create): {e}")
+    except ReceiptPendingError as e:
+        apiary_row.apiary_proof_hash = "0x" + apiary_hash.hex()
+        batch.create_tx_hash = e.tx_hash
+        _commit_or_orphan(db, batch_id_hex, e.tx_hash)
+        return _pending_response(batch_id_hex, e.tx_hash, "create")
     except Exception as e:
+        db.rollback()
         logger.error(f"Blockchain error in simple create_batch: {e}")
         raise HTTPException(status_code=502, detail="Blockchain transaction failed (create)")
 
@@ -920,22 +1084,10 @@ def create_simple_batch(
     # would otherwise revert with insufficient funds on a second back-to-back tx.
     blockchain_service.fund_account(signer_address)
 
-    # Build the batch + persisted HarvestRecord row first; hash from the
-    # canonical row payload so /verify can reproduce it.
-    batch = HoneyBatch(
-        blockchain_batch_id=batch_id_hex,
-        farmer_id=farmer_id,
-        apiary_id=apiary.id,
-        apiary_data=apiary_payload,
-        metadata_payload=metadata_payload,
-        harvest_date=data.harvest_date,
-        quantity=data.quantity_kg,
-        current_state="HARVESTED",
-        create_tx_hash=create_tx,
-        created_at=datetime.fromtimestamp(create_block_ts, tz=timezone.utc),
-    )
-    db.add(batch)
-    db.flush()  # surface batch.id
+    apiary_row.apiary_proof_hash = "0x" + apiary_hash.hex()
+    batch.current_state = "HARVESTED"
+    batch.create_tx_hash = create_tx
+    batch.created_at = datetime.fromtimestamp(create_block_ts, tz=timezone.utc)
 
     harvest_row = HarvestRecord(
         batch_id=batch.id,

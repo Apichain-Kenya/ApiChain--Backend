@@ -58,12 +58,51 @@ def fetch_all_environmental_data():
         db.close()
 
 
+def _reconcile_pending_batches_job():
+    """Wrapper so an import-time failure of `reconcile_batches` (or a
+    transient chain outage during a tick) cannot kill the scheduler."""
+    try:
+        # Lazy import — `scripts/` is added to sys.path by the module's own
+        # bootstrap, but we should not couple service startup to that side
+        # effect. Import inside the job keeps the dependency one-way.
+        import logging
+        import sys
+        from pathlib import Path
+
+        backend_root = Path(__file__).resolve().parent.parent.parent
+        scripts_dir = backend_root / "scripts"
+        if str(scripts_dir) not in sys.path:
+            sys.path.insert(0, str(scripts_dir))
+
+        from reconcile_batches import reconcile_pending_batches  # type: ignore
+
+        summary = reconcile_pending_batches()
+        if summary.get("scanned"):
+            logging.getLogger(__name__).info(
+                "reconciler tick: %s", summary
+            )
+    except Exception:
+        logging.getLogger(__name__).exception("reconciler tick failed")
+
+
 def start_scheduler():
 
     scheduler.add_job(
         fetch_all_environmental_data,
         "interval",
         hours=6
+    )
+
+    # Sprint 6: auto-recovers batches stuck in pending_confirmation after the
+    # request returned HTTP 202, and any pre-existing orphans from prior
+    # "commit failed after on-chain success" paths.
+    scheduler.add_job(
+        _reconcile_pending_batches_job,
+        "interval",
+        seconds=60,
+        id="reconcile_pending_batches",
+        max_instances=1,
+        coalesce=True,
     )
 
     scheduler.start()

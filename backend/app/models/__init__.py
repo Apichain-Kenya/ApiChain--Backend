@@ -1,5 +1,6 @@
 from .batch import HoneyBatch
 from .lab_result import LabResult
+from .apiary_record import ApiaryRecord
 from .harvest_record import HarvestRecord
 from .process_record import ProcessRecord
 from .packaging_record import PackagingRecord
