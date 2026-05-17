@@ -1,4 +1,6 @@
 import os
+import logging
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv  # type: ignore
 
 # CRITICAL: load_dotenv() MUST run before any app.routers imports.
@@ -11,11 +13,30 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app import database
 from app.routers import auth, farmers, user, batch, environmental, apiary
+from app.services.environment_scheduler import start_scheduler, stop_scheduler
 # aggregator router deprecated after 2026-04-12 pivot; see aggregator.py docstring.
 # lab_results router removed in Sprint 3 (2026-05-16) — the canonical
 # oracle-signed path is POST /batches/{id}/lab-verify, which also persists
 # the lab_results row. See routers/batch.py.
-app = FastAPI()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Sprint 6 hotfix: the reconciler + 6-hour environmental snapshot jobs
+    # live in app.services.environment_scheduler. They MUST be started on
+    # boot or HTTP 202 pending batches stay pending forever.
+    try:
+        start_scheduler()
+        logging.getLogger(__name__).info("scheduler started")
+    except Exception:
+        logging.getLogger(__name__).exception("scheduler failed to start")
+    try:
+        yield
+    finally:
+        stop_scheduler()
+
+
+app = FastAPI(lifespan=lifespan)
 
 security = HTTPBearer()
 
