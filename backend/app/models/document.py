@@ -10,7 +10,5 @@ class Document(Base):
     doc_type = Column(String, nullable=True)  # e.g., license, certificate
 
     farmer_id = Column(Integer, ForeignKey("farmers.id"), nullable=True)
-    aggregator_id = Column(Integer, ForeignKey("aggregators.id"), nullable=True)
 
     farmer = relationship("Farmer", back_populates="documents")
-    aggregator = relationship("Aggregator", back_populates="documents")

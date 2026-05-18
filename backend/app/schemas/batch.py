@@ -1,9 +1,57 @@
-from typing import Optional
-from datetime import datetime
-from pydantic import BaseModel, Field, model_validator
+from typing import Optional, Union
+from datetime import datetime, date
+from decimal import Decimal
+from enum import Enum
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-# -- Request schemas --
+# -- Enums (single edit point) -----------------------------------------------
+#
+# Sprint 8: enums live here, not in the DB, so the team can amend the
+# allowed-values list with a one-file edit. The DB column is plain String;
+# Pydantic enforces the constraint at the API boundary. Values are lowercase
+# ASCII so the canonical hash payload is stable.
+
+class HoneyType(str, Enum):
+    ACACIA = "acacia"
+    WILDFLOWER = "wildflower"
+    EUCALYPTUS = "eucalyptus"
+    SUNFLOWER = "sunflower"
+    MIXED = "mixed"
+
+
+class ApiaryManagementMethod(str, Enum):
+    ORGANIC = "organic"
+    CONVENTIONAL = "conventional"
+    REGENERATIVE = "regenerative"
+
+
+# -- Request schemas --------------------------------------------------------
+
+class BatchMetadataInput(BaseModel):
+    """Typed pre-image of the on-chain `metadataHash` (Sprint 8).
+
+    `notes` is intentionally NOT part of the canonical hash payload — see
+    `app/models/batch_metadata.py` and `_metadata_record_canonical_payload`
+    in `app/routers/batch.py`. Farmers can correct a typo in notes without
+    invalidating chain-anchored history.
+    """
+    honey_type: HoneyType
+    expected_yield_kg: Decimal = Field(gt=Decimal("0"), max_digits=8, decimal_places=2)
+    harvest_window_start: date
+    harvest_window_end: date
+    apiary_management_method: ApiaryManagementMethod
+    notes: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _check_window(self) -> "BatchMetadataInput":
+        if self.harvest_window_end < self.harvest_window_start:
+            raise ValueError(
+                "harvest_window_end must be on or after harvest_window_start"
+            )
+        return self
+
 
 class BatchCreateRequest(BaseModel):
     """Data for creating a new honey batch (S0).
@@ -11,11 +59,16 @@ class BatchCreateRequest(BaseModel):
     Sprint 6: `apiary_data` (free-form dict) replaced by `apiary_id` pointing at
     a row in `apiary_locations`. The handler snapshots the apiary fields into
     `apiary_records` so the canonical pre-image hash anchored on chain can be
-    reproduced verbatim at QR-verification time. `metadata` remains free-form
-    pending the stakeholder schema conversation (Sprint 7).
+    reproduced verbatim at QR-verification time.
+
+    Sprint 8: `metadata` now accepts either a typed `BatchMetadataInput`
+    (preferred — persisted in `batch_metadata`, three-way verifiable) or a
+    free-form `dict` (legacy path, kept for one release with a `Deprecation`
+    response header). The router branches on isinstance; the typed shape is
+    discriminated by Pydantic when the request body matches `BatchMetadataInput`.
     """
     apiary_id: int
-    metadata: dict
+    metadata: Union[BatchMetadataInput, dict]
 
 
 class ApiaryLocationCreateRequest(BaseModel):
@@ -28,6 +81,8 @@ class ApiaryLocationCreateRequest(BaseModel):
 
 
 class ApiaryLocationPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     latitude: float
     longitude: float
@@ -35,9 +90,6 @@ class ApiaryLocationPublic(BaseModel):
     vegetation_type: Optional[str] = None
     hive_count: Optional[int] = None
     farmer_id: int
-
-    class Config:
-        from_attributes = True
 
 
 class HarvestRequest(BaseModel):
@@ -63,18 +115,14 @@ class LabVerifyRequest(BaseModel):
     Fields mirror the `lab_results` table columns so the persisted row is the
     canonical pre-image of the on-chain proof hash. See `app/models/lab_result.py`.
     """
-    # Lab metrics (units defined by laboratory; values are nullable so partial
-    # panels are accepted, but at least one must be present in practice).
     moisture_content: Optional[float] = Field(default=None, ge=0, le=100)
     sucrose_level: Optional[float] = Field(default=None, ge=0)
     hmf_level: Optional[float] = Field(default=None, ge=0)
     pollen_density: Optional[float] = Field(default=None, ge=0)
     purity_score: Optional[float] = Field(default=None, ge=0, le=100)
 
-    # Required pass/fail verdict computed off-chain (by frontend or lab system).
     passed_quality_check: bool
 
-    # Provenance metadata for the QR-verification phase.
     laboratory_name: Optional[str] = None
     analyst_name: Optional[str] = None
     certificate_number: Optional[str] = None
@@ -108,10 +156,12 @@ class DistributionRequest(BaseModel):
     handover_notes: Optional[str] = None
 
 
-# -- Response schemas --
+# -- Response schemas -------------------------------------------------------
 
 class BatchResponse(BaseModel):
     """Full batch data returned by API."""
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     blockchain_batch_id: str
     farmer_id: int
@@ -128,9 +178,6 @@ class BatchResponse(BaseModel):
     lab_verified_at: Optional[datetime] = None
     packaged_at: Optional[datetime] = None
     distributed_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
 
 
 class BatchTransitionResponse(BaseModel):
@@ -164,11 +211,9 @@ class BatchHashesResponse(BaseModel):
 
 
 class LabResultPublic(BaseModel):
-    """Persisted lab_results row exposed by the public verify endpoint.
+    """Persisted lab_results row exposed by the public verify endpoint."""
+    model_config = ConfigDict(from_attributes=True)
 
-    Matches `_lab_result_canonical_payload(row)` plus the on-chain hash and
-    the DB-assigned `tested_at` timestamp.
-    """
     batch_id: int
     moisture_content: Optional[float] = None
     sucrose_level: Optional[float] = None
@@ -183,11 +228,10 @@ class LabResultPublic(BaseModel):
     lab_proof_hash: Optional[str] = None
     tested_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
-
 
 class EnvironmentalDataPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     temperature: Optional[float] = None
     humidity: Optional[float] = None
     rainfall: Optional[float] = None
@@ -197,16 +241,13 @@ class EnvironmentalDataPublic(BaseModel):
     weather_source: Optional[str] = None
     recorded_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
-
 
 class StageHashVerification(BaseModel):
     """Three-way comparison between DB-stored hash, on-chain hash, and a
     freshly-recomputed keccak256 of the persisted row.
 
     `match` is true only when all three agree and the chain hash is non-zero.
-    Shared across all 5 lifecycle stages (harvest/process/lab/packaging/distribution).
+    Shared across all lifecycle stages.
     """
     db_hash: str
     chain_hash: str
@@ -214,8 +255,7 @@ class StageHashVerification(BaseModel):
     match: bool
 
 
-# Backwards-compatibility alias — `LabHashVerification` was the Sprint 4 name
-# when only the lab stage carried structured rows. Existing imports keep working.
+# Backwards-compat alias from Sprint 4 when only the lab stage had it.
 LabHashVerification = StageHashVerification
 
 
@@ -224,6 +264,7 @@ class VerificationBlock(BaseModel):
     corresponding `*_records` row exists for the batch (i.e. the stage has
     been executed)."""
     apiary: Optional[StageHashVerification] = None
+    metadata: Optional[StageHashVerification] = None
     harvest: Optional[StageHashVerification] = None
     process: Optional[StageHashVerification] = None
     lab: Optional[StageHashVerification] = None
@@ -232,6 +273,8 @@ class VerificationBlock(BaseModel):
 
 
 class ApiaryRecordPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     batch_id: int
     apiary_id: int
     latitude: float
@@ -242,11 +285,25 @@ class ApiaryRecordPublic(BaseModel):
     apiary_proof_hash: Optional[str] = None
     recorded_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
+
+class BatchMetadataPublic(BaseModel):
+    """Persisted `batch_metadata` row exposed by /verify."""
+    model_config = ConfigDict(from_attributes=True)
+
+    batch_id: int
+    honey_type: str
+    expected_yield_kg: Decimal
+    harvest_window_start: date
+    harvest_window_end: date
+    apiary_management_method: str
+    notes: Optional[str] = None
+    metadata_proof_hash: Optional[str] = None
+    recorded_at: Optional[datetime] = None
 
 
 class HarvestRecordPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     batch_id: int
     harvest_date: Optional[datetime] = None
     quantity_kg: float
@@ -257,11 +314,10 @@ class HarvestRecordPublic(BaseModel):
     harvest_proof_hash: Optional[str] = None
     recorded_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
-
 
 class ProcessRecordPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     batch_id: int
     extraction_method: str
     moisture_content: Optional[float] = None
@@ -269,11 +325,10 @@ class ProcessRecordPublic(BaseModel):
     process_proof_hash: Optional[str] = None
     recorded_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
-
 
 class PackagingRecordPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     batch_id: int
     unit_count: int
     jar_ids: list[str]
@@ -282,20 +337,16 @@ class PackagingRecordPublic(BaseModel):
     packaging_proof_hash: Optional[str] = None
     recorded_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
-
 
 class DistributionRecordPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     batch_id: int
     retailer_name: str
     transport_reference: Optional[str] = None
     handover_notes: Optional[str] = None
     distribution_proof_hash: Optional[str] = None
     recorded_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
 
 
 class TxHashes(BaseModel):
@@ -319,6 +370,7 @@ class BatchVerifyResponse(BaseModel):
     hashes: BatchHashesResponse
     lab_result: Optional[LabResultPublic] = None
     apiary_record: Optional[ApiaryRecordPublic] = None
+    batch_metadata: Optional[BatchMetadataPublic] = None
     harvest_record: Optional[HarvestRecordPublic] = None
     process_record: Optional[ProcessRecordPublic] = None
     packaging_record: Optional[PackagingRecordPublic] = None
@@ -334,9 +386,15 @@ class SimpleBatchCreateRequest(BaseModel):
 
     The farmer is taken from the JWT, not the request body, so authenticated
     users cannot create batches attributed to other farmers.
+
+    Sprint 8: the typed `metadata` block is optional on this endpoint. When
+    present it follows the same persistence + hashing path as `POST /batches/`;
+    when absent the router falls back to the legacy inline metadata dict so
+    existing harvest forms continue to work during the deprecation window.
     """
     apiary_id: int
     harvest_date: datetime
     quantity_kg: float = Field(gt=0)
     hive_ids: list[str] = Field(min_length=1)
     notes: Optional[str] = None
+    metadata: Optional[BatchMetadataInput] = None
