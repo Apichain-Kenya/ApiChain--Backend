@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import Optional
 from datetime import datetime, date
 from decimal import Decimal
 from enum import Enum
@@ -61,14 +61,13 @@ class BatchCreateRequest(BaseModel):
     `apiary_records` so the canonical pre-image hash anchored on chain can be
     reproduced verbatim at QR-verification time.
 
-    Sprint 8: `metadata` now accepts either a typed `BatchMetadataInput`
-    (preferred — persisted in `batch_metadata`, three-way verifiable) or a
-    free-form `dict` (legacy path, kept for one release with a `Deprecation`
-    response header). The router branches on isinstance; the typed shape is
-    discriminated by Pydantic when the request body matches `BatchMetadataInput`.
+    Sprint 9: `metadata` is now strictly typed (`BatchMetadataInput`). The
+    legacy free-form `dict` path accepted in Sprint 8 is removed — requests
+    that do not match `BatchMetadataInput` return 422. Persisted in
+    `batch_metadata` and three-way verifiable on `/verify`.
     """
     apiary_id: int
-    metadata: Union[BatchMetadataInput, dict]
+    metadata: BatchMetadataInput
 
 
 class ApiaryLocationCreateRequest(BaseModel):
@@ -387,14 +386,13 @@ class SimpleBatchCreateRequest(BaseModel):
     The farmer is taken from the JWT, not the request body, so authenticated
     users cannot create batches attributed to other farmers.
 
-    Sprint 8: the typed `metadata` block is optional on this endpoint. When
-    present it follows the same persistence + hashing path as `POST /batches/`;
-    when absent the router falls back to the legacy inline metadata dict so
-    existing harvest forms continue to work during the deprecation window.
+    Sprint 9: `metadata` is required and strictly typed. Same persistence +
+    hashing path as `POST /batches/`. The Sprint 8 fallback to an inline
+    legacy dict is removed.
     """
     apiary_id: int
     harvest_date: datetime
     quantity_kg: float = Field(gt=0)
     hive_ids: list[str] = Field(min_length=1)
     notes: Optional[str] = None
-    metadata: Optional[BatchMetadataInput] = None
+    metadata: BatchMetadataInput

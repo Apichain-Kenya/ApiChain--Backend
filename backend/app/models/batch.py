@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, JSON, Float
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Float
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
 from app.database import Base
@@ -24,11 +24,9 @@ class HoneyBatch(Base):
     quantity = Column(Float, nullable=True)
     # CREATED → HARVESTED → PROCESSED → LAB_VERIFIED → PACKAGED → DISTRIBUTED
 
-    # metadata_payload is the only remaining off-chain blob; the five legacy
-    # *_data JSON columns were dropped in Sprint 7 (migration f7012345abcd)
-    # once every stage had a structured row + *_proof_hash. Metadata stays
-    # free-form until the Sprint 8 schema rewrite (backlog #1).
-    metadata_payload = Column(JSON, nullable=True)
+    # Sprint 8 replaced the free-form metadata_payload JSON mirror with the
+    # structured `batch_metadata` row (see relationship below); Sprint 9
+    # dropped the legacy column in migration c0d1e2f3a4b5.
 
     # State mirror (blockchain)
     current_state = Column(String, default="CREATED", nullable=False)

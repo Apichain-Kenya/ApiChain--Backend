@@ -89,8 +89,12 @@ op.create_table(
 )
 ```
 
-`HoneyBatch.metadata_payload` (JSON) stays for one sprint as the legacy
-mirror — same pattern as the Sprint 7 legacy-JSON deprecation — then dropped.
+`HoneyBatch.metadata_payload` (JSON) stayed for one sprint as the legacy
+mirror — same pattern as the Sprint 7 legacy-JSON deprecation. **Dropped in
+Sprint 9** (migration `c0d1e2f3a4b5`). The legacy free-form `dict` path on
+both `POST /batches/` and `POST /batches/simple` was also hard-cut to 422
+in Sprint 9 — required after the first Hardhat e2e exposed that Pydantic
+smart-Union routing was silently sending typed payloads to the dict branch.
 
 ## 4. `/verify` additions
 

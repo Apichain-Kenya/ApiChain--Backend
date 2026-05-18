@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from web3.exceptions import ContractLogicError
@@ -184,29 +184,6 @@ def _pending_response(batch_id: str, tx_hash: str, stage: str) -> JSONResponse:
 # Create batch (S0)
 # ------------------------------------------------------------------
 
-_LEGACY_METADATA_DEPRECATION_MSG = (
-    "Free-form metadata dict is deprecated as of Sprint 8 and will be "
-    "rejected in Sprint 9. Migrate to the typed BatchMetadataInput shape "
-    "(honey_type, expected_yield_kg, harvest_window_start, "
-    "harvest_window_end, apiary_management_method, notes)."
-)
-
-
-def _mark_legacy_metadata(response: Response, batch_id_hex: str) -> None:
-    """Add deprecation signalling for the legacy free-form `metadata: dict` path.
-
-    `Deprecation: true` is the IETF draft signal; we add an explanatory
-    Warning header for humans and log so adoption can be tracked. Sprint 9
-    will flip this to a hard 422.
-    """
-    response.headers["Deprecation"] = "true"
-    response.headers["Warning"] = f'299 - "{_LEGACY_METADATA_DEPRECATION_MSG}"'
-    logger.warning(
-        "Legacy free-form metadata dict accepted for batch %s — Sprint 9 will reject.",
-        batch_id_hex,
-    )
-
-
 def _persist_typed_metadata(
     db: Session, batch_id: int, payload: BatchMetadataInput
 ) -> BatchMetadata:
@@ -233,7 +210,6 @@ def _persist_typed_metadata(
 @router.post("/", response_model=BatchTransitionResponse)
 def create_batch(
     data: BatchCreateRequest,
-    response: Response,
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles(["farmer"])),
 ):
@@ -242,13 +218,10 @@ def create_batch(
     Sprint 6: `apiary_data` replaced by `apiary_id`; apiary fields snapshotted
     into `apiary_records` for three-way `/verify` comparison.
 
-    Sprint 8: `metadata` now accepts either a typed `BatchMetadataInput`
-    (preferred — persisted in `batch_metadata`, three-way verifiable) or a
-    free-form `dict` (legacy path; deprecation headers added to the
-    response, hard-cut in Sprint 9). The on-chain `metadataHash` is
-    computed from the canonical payload of the persisted row for the typed
-    branch, and from the raw dict for the legacy branch — both produce a
-    `bytes32` hash that the smart contract treats identically.
+    Sprint 9: `metadata` is strictly typed (`BatchMetadataInput`). The
+    canonical payload of the persisted `batch_metadata` row is what's
+    hashed on chain, so `/verify.metadata.match` is recomputable from the
+    row alone.
     """
     _check_blockchain()
 
@@ -268,20 +241,10 @@ def create_batch(
     batch_id_bytes = blockchain_service.generate_batch_id(signer_address)
     batch_id_hex = "0x" + batch_id_bytes.hex()
 
-    is_typed_metadata = isinstance(data.metadata, BatchMetadataInput)
-
-    # The legacy mirror column stays for one sprint so we can roll back if
-    # the typed path needs hot-fixing. Sprint 9 drops the column.
-    if is_typed_metadata:
-        legacy_mirror = data.metadata.model_dump(mode="json")
-    else:
-        legacy_mirror = data.metadata
-
     batch = HoneyBatch(
         blockchain_batch_id=batch_id_hex,
         farmer_id=farmer_id,
         apiary_id=apiary.id,
-        metadata_payload=legacy_mirror,
         current_state="CREATED",
     )
     db.add(batch)
@@ -303,14 +266,9 @@ def create_batch(
     apiary_payload = _apiary_record_canonical_payload(apiary_row)
     apiary_hash = blockchain_service.compute_data_hash(apiary_payload)
 
-    metadata_row: BatchMetadata | None = None
-    if is_typed_metadata:
-        metadata_row = _persist_typed_metadata(db, batch.id, data.metadata)
-        metadata_payload = _metadata_record_canonical_payload(metadata_row)
-        metadata_hash = blockchain_service.compute_data_hash(metadata_payload)
-    else:
-        _mark_legacy_metadata(response, batch_id_hex)
-        metadata_hash = blockchain_service.compute_data_hash(data.metadata)
+    metadata_row = _persist_typed_metadata(db, batch.id, data.metadata)
+    metadata_payload = _metadata_record_canonical_payload(metadata_row)
+    metadata_hash = blockchain_service.compute_data_hash(metadata_payload)
 
     try:
         tx_hash, block_ts = blockchain_service.create_batch(
@@ -321,8 +279,7 @@ def create_batch(
         raise HTTPException(status_code=400, detail=f"Contract error: {e}")
     except ReceiptPendingError as e:
         apiary_row.apiary_proof_hash = "0x" + apiary_hash.hex()
-        if metadata_row is not None:
-            metadata_row.metadata_proof_hash = "0x" + metadata_hash.hex()
+        metadata_row.metadata_proof_hash = "0x" + metadata_hash.hex()
         batch.create_tx_hash = e.tx_hash
         _commit_or_orphan(db, batch_id_hex, e.tx_hash)
         return _pending_response(batch_id_hex, e.tx_hash, "create")
@@ -332,8 +289,7 @@ def create_batch(
         raise HTTPException(status_code=502, detail="Blockchain transaction failed")
 
     apiary_row.apiary_proof_hash = "0x" + apiary_hash.hex()
-    if metadata_row is not None:
-        metadata_row.metadata_proof_hash = "0x" + metadata_hash.hex()
+    metadata_row.metadata_proof_hash = "0x" + metadata_hash.hex()
     batch.create_tx_hash = tx_hash
     batch.created_at = datetime.fromtimestamp(block_ts, tz=timezone.utc)
     _commit_or_orphan(db, batch_id_hex, tx_hash)
@@ -1106,7 +1062,6 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
 @router.post("/simple", response_model=BatchResponse)
 def create_simple_batch(
     data: SimpleBatchCreateRequest,
-    response: Response,
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles(["farmer"])),
 ):
@@ -1117,11 +1072,9 @@ def create_simple_batch(
     real on-chain batch + environmental data without making three separate
     calls. The farmer is taken from the JWT — request body cannot impersonate.
 
-    Sprint 8: `data.metadata` is optional here. When provided it follows the
-    typed path (persisted in `batch_metadata`, hashed from canonical payload);
-    when omitted the legacy `{"source": "simple_endpoint", ...}` dict is used
-    and a `Deprecation` header is added to the response so the frontend can
-    track adoption of the typed shape.
+    Sprint 9: `data.metadata` is required and strictly typed
+    (`BatchMetadataInput`). The legacy inline-dict fallback from Sprint 8
+    is removed — requests without typed metadata return 422.
     """
     _check_blockchain()
 
@@ -1138,22 +1091,13 @@ def create_simple_batch(
     signer_key = _get_user_signing_key(db, farmer_id, current_user["role"])
     signer_address = blockchain_service.w3.eth.account.from_key(signer_key).address
 
-    is_typed_metadata = data.metadata is not None
-    legacy_metadata_payload = {"source": "simple_endpoint", "notes": data.notes}
-
     batch_id_bytes = blockchain_service.generate_batch_id(signer_address)
     batch_id_hex = "0x" + batch_id_bytes.hex()
-
-    if is_typed_metadata:
-        legacy_mirror = data.metadata.model_dump(mode="json")
-    else:
-        legacy_mirror = legacy_metadata_payload
 
     batch = HoneyBatch(
         blockchain_batch_id=batch_id_hex,
         farmer_id=farmer_id,
         apiary_id=apiary.id,
-        metadata_payload=legacy_mirror,
         harvest_date=data.harvest_date,
         quantity=data.quantity_kg,
         current_state="CREATED",
@@ -1177,15 +1121,10 @@ def create_simple_batch(
     apiary_payload = _apiary_record_canonical_payload(apiary_row)
     apiary_hash = blockchain_service.compute_data_hash(apiary_payload)
 
-    metadata_row: BatchMetadata | None = None
-    if is_typed_metadata:
-        metadata_row = _persist_typed_metadata(db, batch.id, data.metadata)
-        metadata_hash = blockchain_service.compute_data_hash(
-            _metadata_record_canonical_payload(metadata_row)
-        )
-    else:
-        _mark_legacy_metadata(response, batch_id_hex)
-        metadata_hash = blockchain_service.compute_data_hash(legacy_metadata_payload)
+    metadata_row = _persist_typed_metadata(db, batch.id, data.metadata)
+    metadata_hash = blockchain_service.compute_data_hash(
+        _metadata_record_canonical_payload(metadata_row)
+    )
 
     try:
         create_tx, create_block_ts = blockchain_service.create_batch(
@@ -1196,8 +1135,7 @@ def create_simple_batch(
         raise HTTPException(status_code=400, detail=f"Contract error (create): {e}")
     except ReceiptPendingError as e:
         apiary_row.apiary_proof_hash = "0x" + apiary_hash.hex()
-        if metadata_row is not None:
-            metadata_row.metadata_proof_hash = "0x" + metadata_hash.hex()
+        metadata_row.metadata_proof_hash = "0x" + metadata_hash.hex()
         batch.create_tx_hash = e.tx_hash
         _commit_or_orphan(db, batch_id_hex, e.tx_hash)
         return _pending_response(batch_id_hex, e.tx_hash, "create")
@@ -1211,8 +1149,7 @@ def create_simple_batch(
     blockchain_service.fund_account(signer_address)
 
     apiary_row.apiary_proof_hash = "0x" + apiary_hash.hex()
-    if metadata_row is not None:
-        metadata_row.metadata_proof_hash = "0x" + metadata_hash.hex()
+    metadata_row.metadata_proof_hash = "0x" + metadata_hash.hex()
     batch.current_state = "HARVESTED"
     batch.create_tx_hash = create_tx
     batch.created_at = datetime.fromtimestamp(create_block_ts, tz=timezone.utc)
