@@ -13,6 +13,9 @@ LEGACY_COLS = (
     "lab_proof_data",
     "packaging_data",
     "distribution_data",
+    # Sprint 9: metadata_payload joined its siblings now that batch_metadata
+    # is canonical (migration c0d1e2f3a4b5).
+    "metadata_payload",
 )
 
 
@@ -20,12 +23,7 @@ def test_legacy_json_columns_removed_from_model():
     table_cols = set(HoneyBatch.__table__.columns.keys())
     leaked = sorted(c for c in LEGACY_COLS if c in table_cols)
     assert not leaked, (
-        f"Legacy honey_batches.*_data columns reappeared: {leaked}. "
-        "They were dropped in Sprint 7 migration f7012345abcd; the "
-        "structured *_records rows are now canonical."
+        f"Legacy honey_batches JSON mirror columns reappeared: {leaked}. "
+        "They were dropped in Sprint 7 (f7012345abcd) and Sprint 9 "
+        "(c0d1e2f3a4b5); the structured rows are now canonical."
     )
-
-
-def test_metadata_payload_still_present():
-    # metadata_payload is intentionally retained — pending Sprint 8 schema work.
-    assert "metadata_payload" in HoneyBatch.__table__.columns.keys()
