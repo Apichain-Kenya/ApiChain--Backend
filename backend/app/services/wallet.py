@@ -4,10 +4,9 @@ Wallet creation service for ApiChain Kenya.
 Provides a single reusable function for generating Ethereum wallets,
 encrypting private keys, and storing them in the eth_wallets table.
 
-Previously this logic was duplicated inline in farmers.py and
-aggregator.py registration endpoints. Now it lives here so that
-any enrollment path (self-registration, admin enrollment, seeding)
-can call the same function.
+Previously this logic was duplicated inline in farmers.py
+registration endpoints. Now it lives here so that any enrollment
+path (admin enrollment, seeding) can call the same function.
 """
 
 import logging

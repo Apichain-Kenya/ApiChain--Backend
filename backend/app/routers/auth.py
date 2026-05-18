@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 import random
 from app.database import get_db
 from app.models.farmer import Farmer
-from app.models.aggregator import Aggregator
 from app.auth import verify_password, create_access_token
 from app.schemas.auth import LoginRequest
 from app.models.user import User
