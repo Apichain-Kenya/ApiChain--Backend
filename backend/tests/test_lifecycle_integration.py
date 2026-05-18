@@ -92,10 +92,28 @@ def test_full_lifecycle_walks_s0_to_s5(backend_base_url, invite_code):
     assert r.json().get("wallet_address"), "farmer must receive a wallet at enrollment"
     farmer_token = _login(client, farmer_payload["username"], farmer_payload["password"])
 
-    # ----- S0 CREATE -----
+    # ----- seed an apiary first (Sprint 6: POST /batches/ takes apiary_id, not apiary_data) -----
+    r = client.post("/apiary-locations/", json={
+        "latitude": -1.2921,
+        "longitude": 36.8219,
+        "altitude": 1795.0,
+        "vegetation_type": "acacia woodland",
+        "hive_count": 18,
+    }, headers=_auth(farmer_token))
+    assert r.status_code == 200, r.text
+    apiary_id = r.json()["id"]
+
+    # ----- S0 CREATE (Sprint 8: typed metadata) -----
     r = client.post("/batches/", json={
-        "apiary_data": {"region": "Baringo", "apiary_id": f"AP-{suffix}"},
-        "metadata": {"honey_type": "wildflower", "expected_yield_kg": 50},
+        "apiary_id": apiary_id,
+        "metadata": {
+            "honey_type": "wildflower",
+            "expected_yield_kg": "50.00",
+            "harvest_window_start": "2026-05-01",
+            "harvest_window_end": "2026-05-31",
+            "apiary_management_method": "organic",
+            "notes": "integration test",
+        },
     }, headers=_auth(farmer_token))
     assert r.status_code == 200, r.text
     create_resp = r.json()
@@ -172,6 +190,15 @@ def test_full_lifecycle_walks_s0_to_s5(backend_base_url, invite_code):
     for hk in ["apiary_hash", "harvest_hash", "process_hash", "lab_proof_hash", "packaging_hash", "distribution_hash"]:
         assert hashes[hk] and hashes[hk] != zero, f"{hk} is zero/missing"
 
+    # Sprint 8: every anchored hash is three-way verifiable, including metadata
+    verification = body.get("verification") or {}
+    for stage in (
+        "apiary", "metadata", "harvest", "process", "lab", "packaging", "distribution",
+    ):
+        block = verification.get(stage) or {}
+        assert block.get("match") is True, f"verification.{stage}.match is not True: {block}"
+    assert body.get("batch_metadata"), "batch_metadata record should be populated"
+
     # All 6 timestamps are non-zero and strictly monotonic (chain block times)
     timeline = body["timeline"]
     ts_keys = ["created_at", "harvested_at", "processed_at", "lab_verified_at", "packaged_at", "distributed_at"]
@@ -221,7 +248,13 @@ def test_wallet_less_user_cannot_sign_batch_write(backend_base_url, invite_code)
     # anyway). We expect 403 from require_roles BEFORE reaching the signing path,
     # which is correct behaviour — the signing hard-fail is the *fallback* layer.
     officer_token = _login(client, payload["username"], payload["password"])
-    r = client.post("/batches/", json={"apiary_data": {}, "metadata": {}}, headers=_auth(officer_token))
+    # Sprint 6: body shape is {apiary_id, metadata}. The officer should be
+    # rejected by require_roles(["farmer"]) before any payload validation runs.
+    r = client.post(
+        "/batches/",
+        json={"apiary_id": 0, "metadata": {}},
+        headers=_auth(officer_token),
+    )
     # 403 from role guard is the expected and intended block — wallet hard-fail is
     # the deeper defense for users WITH the right role but no wallet, which we
     # already exercise implicitly in the lifecycle test by ensuring every wallet
