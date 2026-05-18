@@ -1,9 +1,11 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from datetime import datetime
 from typing import Optional
 
 
 class EnvironmentalDataResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     apiary_id: int
 
@@ -19,6 +21,3 @@ class EnvironmentalDataResponse(BaseModel):
     weather_source: Optional[str]
 
     recorded_at: datetime
-
-    class Config:
-        from_attributes = True

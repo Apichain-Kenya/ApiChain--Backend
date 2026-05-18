@@ -171,10 +171,19 @@ def run(base_url: str, invite_code: str) -> int:
         apiary_id = apiary_resp["id"]
         logger.info("Seeded apiary id=%s", apiary_id)
 
-        # 6. Create batch (S0) — structured apiary pre-image is anchored as apiaryHash
+        # 6. Create batch (S0) — Sprint 8: typed metadata payload anchors
+        # `metadataHash` from a persisted `batch_metadata` row, so /verify
+        # surfaces a three-way `verification.metadata` block alongside apiary.
         create_resp = _post(client, "/batches/", {
             "apiary_id": apiary_id,
-            "metadata": {"honey_type": "wildflower", "expected_yield_kg": 50},
+            "metadata": {
+                "honey_type": "wildflower",
+                "expected_yield_kg": "50.00",
+                "harvest_window_start": "2026-05-01",
+                "harvest_window_end": "2026-05-31",
+                "apiary_management_method": "organic",
+                "notes": "e2e run",
+            },
         }, headers=_auth(farmer_token))
         batch_id = create_resp["batch_id"]
         _assert(create_resp["new_state"] == "CREATED", f"expected CREATED, got {create_resp['new_state']}")
@@ -285,9 +294,18 @@ def run(base_url: str, invite_code: str) -> int:
 
         verification = verify_resp.get("verification") or {}
 
-        # Sprint 6: S0 apiary stage now also carries a structured proof hash,
-        # closing the symmetry across all six lifecycle stages.
-        for stage in ("apiary", "harvest", "process", "lab", "packaging", "distribution"):
+        # Sprint 8: metadata joins the family — every anchored hash in the
+        # six-stage lifecycle is now three-way verifiable from a single
+        # normalized DB row.
+        for stage in (
+            "apiary",
+            "metadata",
+            "harvest",
+            "process",
+            "lab",
+            "packaging",
+            "distribution",
+        ):
             block = verification.get(stage) or {}
             _assert(
                 block.get("match") is True,
@@ -298,10 +316,10 @@ def run(base_url: str, invite_code: str) -> int:
                 f"three-way hash mismatch in verification.{stage}: {block}",
             )
 
-        # Sprint 6: apiary_record joins the family; every stage row must be
-        # populated under /verify.
+        # Every persisted record row must be present under /verify.
         for record_key in (
             "apiary_record",
+            "batch_metadata",
             "harvest_record",
             "process_record",
             "lab_result",
@@ -312,6 +330,13 @@ def run(base_url: str, invite_code: str) -> int:
                 verify_resp.get(record_key) is not None,
                 f"{record_key} missing from /verify response",
             )
+
+        # Sprint 8: `notes` is intentionally excluded from the hash payload
+        # but must round-trip through /verify so the QR display can show it.
+        _assert(
+            (verify_resp.get("batch_metadata") or {}).get("notes") == "e2e run",
+            "batch_metadata.notes was not preserved through /verify",
+        )
 
         tx = verify_resp.get("tx_hashes") or {}
         for tk in ["create_tx", "harvest_tx", "process_tx", "lab_tx", "package_tx", "distribute_tx"]:

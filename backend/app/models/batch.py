@@ -97,5 +97,12 @@ class HoneyBatch(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+
+    metadata_record = relationship(
+        "BatchMetadata",
+        back_populates="batch",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
     #prediction = relationship("PredictionResult", back_populates="batch", uselist=False)
     #validation = relationship("ValidationResult", back_populates="batch", uselist=False)

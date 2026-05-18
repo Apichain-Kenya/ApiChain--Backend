@@ -1,8 +1,20 @@
-# Metadata Schema Proposal (Sprint 8 candidate)
+# Metadata Schema Proposal (Implemented in Sprint 8)
 
-**Status:** Draft for stakeholder review. No code change ships in Sprint 7.
-**Owner:** Ian Mwau. **Supervisor sign-off needed:** Dr. Agnes Mindila.
-**Sprint 7 backlog reference:** #1.
+**Status:** Implemented as of 2026-05-18. Supervisor-approved.
+**Owner:** Ian Mwau. **Supervisor sign-off:** Dr. Agnes Mindila (approved).
+**Sprint 8 references:** model `app/models/batch_metadata.py`; migration
+`alembic/versions/a8b9c0d1e2f3_add_batch_metadata.py`; helpers
+`_metadata_record_canonical_payload` + `_verify_metadata_hash` in
+`app/routers/batch.py`; unit tests `tests/test_metadata_hash.py` +
+`tests/test_metadata_canonical_payload.py`.
+
+The implementation matches sections 2 + 3 of this proposal verbatim, except
+that enums are enforced at the Pydantic layer (`HoneyType` and
+`ApiaryManagementMethod` in `app/schemas/batch.py`) rather than via
+PostgreSQL ENUM types — this keeps the allowed-values list editable with a
+one-file change instead of an `ALTER TYPE` migration. Section 5's open
+questions are unresolved by design: the schema is intentionally flexible so
+the team can amend it after live feedback without breaking persistence.
 
 ---
 
