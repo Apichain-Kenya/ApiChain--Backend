@@ -316,39 +316,58 @@ def upload_document(
 
     return {"message": f"{doc_type} uploaded successfully"}
 
+# UPDATED: Allow harvest_processor to view farmers
 @router.get("/")
 def get_farmers(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    if current_user["role"] != "on_ground_officer":
+    # Allow on_ground_officer AND harvest_processor
+    if current_user["role"] == "on_ground_officer":
+        farmers = (
+            db.query(Farmer)
+            .filter(Farmer.onboarded_by == current_user["user_id"])
+            .all()
+        )
+        return {
+            "count": len(farmers),
+            "data": [
+                {
+                    "id": f.id,
+                    "first_name": f.first_name,
+                    "last_name": f.last_name,
+                    "phone": f.phone,
+                    "email": f.email,
+                    "address": f.address,
+                    "number_of_hives": f.number_of_hives,
+                    "experience": f.experience,
+                    "education": f.education,
+                    "feeding_practice": f.feeding_practice,
+                    "created_at": f.created_at,
+                }
+                for f in farmers
+            ],
+        }
+    elif current_user["role"] == "harvest_processor":
+        # Harvest processor can see all farmers (for batch registration)
+        farmers = db.query(Farmer).all()
+        return {
+            "count": len(farmers),
+            "data": [
+                {
+                    "id": f.id,
+                    "first_name": f.first_name,
+                    "last_name": f.last_name,
+                    "phone": f.phone,
+                    "email": f.email,
+                    "address": f.address,
+                    "number_of_hives": f.number_of_hives,
+                }
+                for f in farmers
+            ],
+        }
+    else:
         raise HTTPException(status_code=403, detail="Unauthorized")
-
-    farmers = (
-        db.query(Farmer)
-        .filter(Farmer.onboarded_by == current_user["user_id"])
-        .all()
-    )
-
-    return {
-        "count": len(farmers),
-        "data": [
-            {
-                "id": f.id,
-                "first_name": f.first_name,
-                "last_name": f.last_name,
-                "phone": f.phone,
-                "email": f.email,
-                "address": f.address,
-                "number_of_hives": f.number_of_hives,
-                "experience": f.experience,
-                "education": f.education,
-                "feeding_practice": f.feeding_practice,
-                "created_at": f.created_at,
-            }
-            for f in farmers
-        ],
-    }
 
 @router.get("/{farmer_id}")
 def get_farmer(
@@ -376,17 +395,21 @@ def get_farmer(
 
 
 
+# UPDATED: Allow harvest_processor to view farm stats
 @router.get("/stats/overview")
 def get_farm_stats(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    if current_user["role"] != "on_ground_officer":
+    if current_user["role"] == "on_ground_officer":
+        farmers_query = db.query(Farmer).filter(
+            Farmer.onboarded_by == current_user["user_id"]
+        )
+    elif current_user["role"] == "harvest_processor":
+        # Harvest processor can see all farmers' stats
+        farmers_query = db.query(Farmer)
+    else:
         raise HTTPException(status_code=403, detail="Unauthorized")
-
-    farmers_query = db.query(Farmer).filter(
-        Farmer.onboarded_by == current_user["user_id"]
-    )
 
     farmers = farmers_query.all()
 

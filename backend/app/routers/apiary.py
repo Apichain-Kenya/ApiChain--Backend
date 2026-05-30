@@ -8,13 +8,13 @@ explicit way for farmers and field officers to seed an apiary first.
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from geoalchemy2.shape import from_shape
 from shapely.geometry import Point
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.deps import require_roles
+from app.deps import require_roles, get_current_user
 from app.models.apiary import ApiaryLocation
 from app.models.farmer import Farmer
 from app.schemas.batch import (
@@ -25,6 +25,51 @@ from app.schemas.batch import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/apiary-locations", tags=["Apiary"])
+
+
+@router.get("/")
+def get_apiary_locations(
+    farmer_id: int = Query(None, description="Filter by farmer ID"),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Get apiary locations.
+    - Harvest processors can view all apiaries
+    - On-ground officers can view apiaries for farmers they onboarded
+    - Farmers can view their own apiaries
+    """
+    
+    query = db.query(ApiaryLocation)
+    
+    if farmer_id:
+        query = query.filter(ApiaryLocation.farmer_id == farmer_id)
+    
+    if current_user["role"] == "farmer":
+        query = query.filter(ApiaryLocation.farmer_id == current_user["user_id"])
+    elif current_user["role"] == "on_ground_officer":
+        farmer_ids = db.query(Farmer.id).filter(Farmer.onboarded_by == current_user["user_id"]).all()
+        farmer_ids = [f[0] for f in farmer_ids]
+        if farmer_ids:
+            query = query.filter(ApiaryLocation.farmer_id.in_(farmer_ids))
+        else:
+            return []
+    elif current_user["role"] not in ["super_admin", "admin", "harvest_processor"]:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+    
+    apiaries = query.all()
+    
+    return [
+        {
+            "id": a.id,
+            "latitude": a.latitude,
+            "longitude": a.longitude,
+            "altitude": a.altitude,
+            "vegetation_type": a.vegetation_type,
+            "hive_count": a.hive_count,
+            "farmer_id": a.farmer_id,
+        }
+        for a in apiaries
+    ]
 
 
 @router.post("/", response_model=ApiaryLocationPublic)

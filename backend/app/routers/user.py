@@ -1,11 +1,13 @@
 import os
 import logging
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session  # type: ignore
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from typing import List, Optional
+from pydantic import BaseModel, EmailStr
 
 from app.database import get_db
 from app.models.user import User
-from app.schemas.user import SuperAdminCreate, EmployeeCreate
+from app.models.farmer import Farmer
 from app.auth import hash_password
 from app.deps import require_roles
 from app.services.wallet import create_user_wallet
@@ -15,12 +17,81 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
+# ========== Schemas ==========
+
+class SuperAdminCreate(BaseModel):
+    inviteCode: str
+    firstName: str
+    lastName: str
+    username: str
+    email: EmailStr
+    phone: str
+    password: str
+
+class EmployeeCreate(BaseModel):
+    first_name: str
+    last_name: str
+    username: str
+    email: EmailStr
+    phone: str
+    password: str
+    role: str
+
+class InviteCodeVerify(BaseModel):
+    inviteCode: str
+
+class UserResponse(BaseModel):
+    id: int
+    first_name: str
+    last_name: str
+    username: str
+    email: Optional[str] = None
+    phone: str
+    role: str
+    is_active: bool = True
+    created_by: Optional[int] = None
+
+    class Config:
+        from_attributes = True
+
+class UserUpdate(BaseModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    username: Optional[str] = None
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class ToggleStatusRequest(BaseModel):
+    is_active: bool
+
+class EmployeeResponse(BaseModel):
+    message: str
+    user: dict
+    wallet_address: Optional[str] = None
+    blockchain: Optional[dict] = None
+
+# ========== PUBLIC ENDPOINTS (No authentication required) ==========
+
+@router.post("/verify-invite-code")
+def verify_invite_code(data: InviteCodeVerify):
+    """
+    Verify if the invite code is valid.
+    """
+    correct_code = os.getenv("SUPER_ADMIN_CODE", "ApiChain@SuperAdmin2025")
+    
+    if data.inviteCode == correct_code:
+        return {"valid": True, "message": "Code verified successfully"}
+    else:
+        raise HTTPException(status_code=400, detail="Invalid invite code")
+
 
 @router.post("/super-admin/signup")
 def create_super_admin(data: SuperAdminCreate, db: Session = Depends(get_db)):
-
-    if data.inviteCode != os.getenv("SUPER_ADMIN_CODE"):
-        raise HTTPException(status_code=403, detail="Invalid invite code")
+    super_admin_code = os.getenv("SUPER_ADMIN_CODE", "ApiChain@SuperAdmin2025")
+    if data.inviteCode != super_admin_code:
+        raise HTTPException(status_code=400, detail="Invalid invite code")
 
     existing = db.query(User).filter(User.role == "super_admin").first()
     if existing:
@@ -43,6 +114,7 @@ def create_super_admin(data: SuperAdminCreate, db: Session = Depends(get_db)):
         phone=data.phone,
         password=hash_password(data.password),
         role="super_admin",
+        is_active=True,
     )
 
     db.add(user)
@@ -54,19 +126,17 @@ def create_super_admin(data: SuperAdminCreate, db: Session = Depends(get_db)):
     role_result = grant_blockchain_role_to_user(db, user.id, "super_admin")
     logger.info(f"Super admin {user.id} created. Blockchain: {role_result['message']}")
 
-    return {"message": "Super admin created successfully"}
+    return {"message": "Super admin created successfully", "user_id": user.id}
 
 
-@router.post("/create-employee")
+# ========== AUTHENTICATED ENDPOINTS ==========
+
+@router.post("/create-employee", response_model=EmployeeResponse)
 def create_employee(
     data: EmployeeCreate,
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles(["super_admin", "admin"])),
 ):
-    """
-    Create system employees (admin-controlled endpoint).
-    Wallet + blockchain role are assigned automatically for applicable roles.
-    """
 
     allowed_roles = [
         "admin",
@@ -101,6 +171,7 @@ def create_employee(
         password=hash_password(data.password),
         role=data.role,
         created_by=current_user["user_id"],
+        is_active=True,
     )
 
     db.add(user)
@@ -113,14 +184,11 @@ def create_employee(
         db.commit()
 
     role_result = grant_blockchain_role_to_user(db, user.id, data.role)
-    logger.info(
-        f"Employee {user.id} (role={data.role}) created. "
-        f"Wallet={wallet_address or 'N/A'}, Blockchain: {role_result['message']}"
-    )
+    logger.info(f"Employee {user.id} (role={data.role}) created")
 
-    return {
-        "message": "Employee created successfully",
-        "user": {
+    return EmployeeResponse(
+        message="Employee created successfully",
+        user={
             "id": user.id,
             "first_name": user.first_name,
             "last_name": user.last_name,
@@ -129,7 +197,182 @@ def create_employee(
             "phone": user.phone,
             "role": user.role,
             "created_by": user.created_by,
+            "is_active": user.is_active,
         },
-        "wallet_address": wallet_address,
-        "blockchain": role_result,
+        wallet_address=wallet_address,
+        blockchain=role_result,
+    )
+
+
+@router.get("/")
+def get_all_users(
+    current_user: dict = Depends(require_roles(["super_admin"])),
+    db: Session = Depends(get_db),
+):
+    """Get all employees only"""
+    users = db.query(User).all()
+    return users
+
+
+@router.get("/all-users-with-farmers")
+def get_all_users_including_farmers(
+    current_user: dict = Depends(require_roles(["super_admin"])),
+    db: Session = Depends(get_db),
+):
+    """Get all users including farmers"""
+    from app.models.farmer import Farmer
+    
+    employees = db.query(User).all()
+    farmers = db.query(Farmer).all()
+    
+    all_users = []
+    
+    # Add employees
+    for emp in employees:
+        all_users.append({
+            "id": emp.id,
+            "user_type": "employee",
+            "first_name": emp.first_name,
+            "last_name": emp.last_name,
+            "username": emp.username,
+            "email": emp.email,
+            "phone": emp.phone,
+            "role": emp.role,
+            "is_active": emp.is_active,
+            "created_by": emp.created_by,
+            "created_at": getattr(emp, 'created_at', None),
+        })
+    
+    # Add farmers
+    for farmer in farmers:
+        farmer_dict = {
+            "id": farmer.id,
+            "user_type": "farmer",
+            "first_name": farmer.first_name,
+            "last_name": farmer.last_name,
+            "username": farmer.username if farmer.username else farmer.phone,
+            "phone": farmer.phone,
+            "role": "farmer",
+            "is_active": True,
+            "created_at": getattr(farmer, 'created_at', None),
+        }
+        if hasattr(farmer, 'email') and farmer.email:
+            farmer_dict["email"] = farmer.email
+        if hasattr(farmer, 'onboarded_by'):
+            farmer_dict["created_by"] = farmer.onboarded_by
+        
+        all_users.append(farmer_dict)
+    
+    return all_users
+
+
+@router.get("/{user_id}")
+def get_user(
+    user_id: int,
+    current_user: dict = Depends(require_roles(["super_admin"])),
+    db: Session = Depends(get_db),
+):
+    """Get a specific user by ID"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return user
+
+
+@router.put("/{user_id}")
+def update_user(
+    user_id: int,
+    user_update: UserUpdate,
+    current_user: dict = Depends(require_roles(["super_admin"])),
+    db: Session = Depends(get_db),
+):
+    """Update a user"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Don't allow updating your own role
+    if user.id == current_user["user_id"] and user_update.role and user_update.role != user.role:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot change your own role"
+        )
+    
+    update_data = user_update.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(user, field, value)
+    
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(
+    user_id: int,
+    current_user: dict = Depends(require_roles(["super_admin"])),
+    db: Session = Depends(get_db),
+):
+    """Delete a user"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Cannot delete yourself
+    if user.id == current_user["user_id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete your own account"
+        )
+    
+    # Cannot delete last super admin
+    if user.role == "super_admin":
+        super_admin_count = db.query(User).filter(User.role == "super_admin").count()
+        if super_admin_count <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot delete the last super admin"
+            )
+    
+    db.delete(user)
+    db.commit()
+    return None
+
+
+@router.patch("/{user_id}/toggle-status")
+def toggle_user_status(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_roles(["super_admin"])),
+):
+    """Toggle user active status"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Cannot deactivate yourself
+    if user.id == current_user["user_id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot deactivate your own account"
+        )
+    
+    # Cannot deactivate last super admin
+    if user.role == "super_admin":
+        super_admin_count = db.query(User).filter(User.role == "super_admin").count()
+        if super_admin_count <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot deactivate the last super admin"
+            )
+    
+    user.is_active = not user.is_active
+    db.commit()
+    db.refresh(user)
+    
+    return {
+        "id": user.id,
+        "is_active": user.is_active,
+        "message": f"User {'activated' if user.is_active else 'deactivated'} successfully"
     }

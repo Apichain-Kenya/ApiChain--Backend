@@ -11,9 +11,6 @@ from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
-
-
-
 @router.post("/login")
 def login(data: LoginRequest, db: Session = Depends(get_db)):
 
@@ -33,7 +30,16 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
         return {
             "access_token": token,
             "token_type": "bearer",
-            "role": user.role
+            "role": user.role,
+            "user": {
+                "id": user.id,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "username": user.username,
+                "email": user.email,
+                "phone": user.phone,
+                "role": user.role
+            }
         }
 
     farmer = db.query(Farmer).filter(
@@ -52,7 +58,16 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
         return {
             "access_token": token,
             "token_type": "bearer",
-            "role": "farmer"
+            "role": "farmer",
+            "user": {
+                "id": farmer.id,
+                "first_name": farmer.first_name,
+                "last_name": farmer.last_name,
+                "username": farmer.username,
+                "email": farmer.email,
+                "phone": farmer.phone,
+                "role": "farmer"
+            }
         }
 
     raise HTTPException(status_code=401, detail="Invalid credentials")
