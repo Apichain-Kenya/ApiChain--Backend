@@ -18,3 +18,8 @@ twilio
 pydantic[email]
 web3
 apscheduler
+
+numpy
+joblib
+scikit-learn
+xgboost
