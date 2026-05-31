@@ -1063,7 +1063,7 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
 def create_simple_batch(
     data: SimpleBatchCreateRequest,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(require_roles(["farmer", "harvest_processor", "admin", "super_admin"])),
+    current_user: dict = Depends(require_roles(["farmer"])),
 ):
     """One-shot batch creation that anchors S0 (CREATED) and S1 (HARVESTED)
     on chain in a single call, then attaches a fresh environmental snapshot.
