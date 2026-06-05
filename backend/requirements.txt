@@ -19,7 +19,13 @@ pydantic[email]
 web3
 apscheduler
 
-numpy
-joblib
-scikit-learn
-xgboost
+# GeoAI (Sprint 12): pinned to the model artifacts' training versions.
+# scikit-learn==1.6.1 is REQUIRED — the .pkl ensembles/scaler/encoders were
+# pickled under 1.6.1; any other minor emits InconsistentVersionWarning and
+# may produce invalid results. numpy/scipy/xgboost/joblib pinned to the
+# verified-clean set (see docs/future-works-and-sprint12-geoai.md §6.4).
+numpy==2.4.4
+scipy==1.17.1
+joblib==1.5.3
+scikit-learn==1.6.1
+xgboost==3.2.0
