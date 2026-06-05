@@ -72,6 +72,35 @@ class EmployeeResponse(BaseModel):
     wallet_address: Optional[str] = None
     blockchain: Optional[dict] = None
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+@router.post("/{user_id}/change-password")
+def change_password(
+    user_id: int,
+    data: ChangePasswordRequest,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_roles(["super_admin", "admin"])),
+):
+    """Change user password"""
+    from app.auth import verify_password, hash_password
+    
+    if user_id != current_user["user_id"]:
+        raise HTTPException(status_code=403, detail="You can only change your own password")
+    
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if not verify_password(data.current_password, user.password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    
+    user.password = hash_password(data.new_password)
+    db.commit()
+    
+    return {"message": "Password changed successfully"}
+
 # ========== PUBLIC ENDPOINTS (No authentication required) ==========
 
 @router.post("/verify-invite-code")
@@ -130,14 +159,12 @@ def create_super_admin(data: SuperAdminCreate, db: Session = Depends(get_db)):
 
 
 # ========== AUTHENTICATED ENDPOINTS ==========
-
 @router.post("/create-employee", response_model=EmployeeResponse)
 def create_employee(
     data: EmployeeCreate,
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles(["super_admin", "admin"])),
 ):
-
     allowed_roles = [
         "admin",
         "on_ground_officer",
@@ -162,6 +189,8 @@ def create_employee(
     if db.query(User).filter(User.username == data.username).first():
         raise HTTPException(status_code=400, detail="Username already exists")
 
+    from datetime import datetime
+    
     user = User(
         first_name=data.first_name,
         last_name=data.last_name,
@@ -198,11 +227,11 @@ def create_employee(
             "role": user.role,
             "created_by": user.created_by,
             "is_active": user.is_active,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
         },
         wallet_address=wallet_address,
         blockchain=role_result,
     )
-
 
 @router.get("/")
 def get_all_users(
@@ -213,14 +242,14 @@ def get_all_users(
     users = db.query(User).all()
     return users
 
-
 @router.get("/all-users-with-farmers")
 def get_all_users_including_farmers(
     current_user: dict = Depends(require_roles(["super_admin"])),
     db: Session = Depends(get_db),
 ):
-    """Get all users including farmers"""
+    """Get all users including farmers with proper created_at dates"""
     from app.models.farmer import Farmer
+    from datetime import datetime
     
     employees = db.query(User).all()
     farmers = db.query(Farmer).all()
@@ -229,6 +258,11 @@ def get_all_users_including_farmers(
     
     # Add employees
     for emp in employees:
+        # Handle created_at properly
+        created_at = getattr(emp, 'created_at', None)
+        if created_at is None:
+            created_at = datetime.utcnow()
+        
         all_users.append({
             "id": emp.id,
             "user_type": "employee",
@@ -240,11 +274,16 @@ def get_all_users_including_farmers(
             "role": emp.role,
             "is_active": emp.is_active,
             "created_by": emp.created_by,
-            "created_at": getattr(emp, 'created_at', None),
+            "created_at": created_at.isoformat() if hasattr(created_at, 'isoformat') else created_at,
         })
     
     # Add farmers
     for farmer in farmers:
+        # Handle created_at properly
+        created_at = getattr(farmer, 'created_at', None)
+        if created_at is None:
+            created_at = datetime.utcnow()
+        
         farmer_dict = {
             "id": farmer.id,
             "user_type": "farmer",
@@ -254,7 +293,7 @@ def get_all_users_including_farmers(
             "phone": farmer.phone,
             "role": "farmer",
             "is_active": True,
-            "created_at": getattr(farmer, 'created_at', None),
+            "created_at": created_at.isoformat() if hasattr(created_at, 'isoformat') else created_at,
         }
         if hasattr(farmer, 'email') and farmer.email:
             farmer_dict["email"] = farmer.email
@@ -263,8 +302,10 @@ def get_all_users_including_farmers(
         
         all_users.append(farmer_dict)
     
+    # Sort by created_at (newest first)
+    all_users.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+    
     return all_users
-
 
 @router.get("/{user_id}")
 def get_user(

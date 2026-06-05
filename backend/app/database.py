@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
 from dotenv import load_dotenv
@@ -18,6 +18,12 @@ engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
     pool_pre_ping=True,  # helps with dropped connections
 )
+
+@event.listens_for(engine, "connect")
+def set_timezone(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("SET timezone = 'Africa/Nairobi'")
+    cursor.close()
 
 # Create session local class
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

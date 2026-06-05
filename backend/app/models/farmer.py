@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime
 from geoalchemy2 import Geography   # type: ignore
 from sqlalchemy.orm import relationship  # type: ignore
+from sqlalchemy.sql import func
 from app.database import Base
 from datetime import datetime
 from app.models.apiary import ApiaryLocation   
@@ -33,8 +34,10 @@ class Farmer(Base):
 
     verification_status = Column(String, default="pending")
     onboarded_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     documents = relationship("Document", back_populates="farmer")
     apiaries = relationship("ApiaryLocation", back_populates="farmer")
+
+    is_active = Column(Boolean, default=True)
