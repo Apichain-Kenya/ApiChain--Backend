@@ -154,8 +154,18 @@ def get_result(
     if not prediction:
         raise HTTPException(404, "No prediction found — run /predict first")
 
+    # Include the actual lab metrics so the dashboard's predicted-vs-actual
+    # table has both sides in one call (the /batches list payload omits them).
+    lab = db.query(LabResult).filter(LabResult.batch_id == batch_id).first()
+    lab_actuals = {
+        "moisture_content": lab.moisture_content if lab else None,
+        "sucrose_level":    lab.sucrose_level if lab else None,
+        "hmf_level":        lab.hmf_level if lab else None,
+    }
+
     return {
         "batch_id":   batch_id,
         "prediction": prediction,
         "validation": validation,
+        "lab":        lab_actuals,
     }
