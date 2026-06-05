@@ -29,6 +29,7 @@ from app.models.packaging_record import PackagingRecord
 from app.models.distribution_record import DistributionRecord
 from app.schemas.batch import (
     ApiaryRecordPublic,
+    AuthenticityPublic,
     BatchCreateRequest,
     BatchMetadataInput,
     BatchMetadataPublic,
@@ -975,6 +976,7 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
     env_public: EnvironmentalDataPublic | None = None
     verification: VerificationBlock | None = None
     tx_hashes: TxHashes | None = None
+    authenticity: AuthenticityPublic | None = None
 
     if batch is not None:
         tx_hashes = TxHashes(
@@ -984,6 +986,20 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
             lab_tx=batch.lab_verify_tx_hash,
             package_tx=batch.packaging_tx_hash,
             distribute_tx=batch.distribution_tx_hash,
+        )
+
+        # GeoAI authenticity summary (chain-neutral): joined from
+        # validation_results by integer batch.id. Absent until validate runs.
+        from app.models.geo_ai import ValidationResult
+        _val = (
+            db.query(ValidationResult)
+            .filter(ValidationResult.batch_id == batch.id)
+            .first()
+        )
+        authenticity = AuthenticityPublic(
+            available=_val is not None,
+            status=_val.validation_status if _val else None,
+            score=_val.authenticity_score if _val else None,
         )
 
         v_kwargs: dict = {}
@@ -1056,6 +1072,7 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
         environmental_data=env_public,
         verification=verification,
         tx_hashes=tx_hashes,
+        authenticity=authenticity,
     )
 
 
