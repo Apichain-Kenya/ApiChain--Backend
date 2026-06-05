@@ -19,7 +19,7 @@ def run_prediction(
     batch_id: int,
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles([
-        "on_ground_officer", "admin", "super_admin"
+        "lab_test_officer", "on_ground_officer", "admin", "super_admin"
     ])),
 ):
     batch = db.query(HoneyBatch).filter(
@@ -86,7 +86,7 @@ def run_validation(
     batch_id: int,
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles([
-        "on_ground_officer", "admin", "super_admin"
+        "lab_test_officer", "on_ground_officer", "admin", "super_admin"
     ])),
 ):
     batch = db.query(HoneyBatch).filter(
