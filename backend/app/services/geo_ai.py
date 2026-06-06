@@ -243,15 +243,13 @@ def compute_prediction(
     }
 
 
-def compute_validation(
-    prediction: dict,
-    actual_moisture: float,
-    actual_hmf: float,
-    actual_sugar=None,
-) -> dict:
+def compute_validation(prediction: dict, actual_moisture: "float | None",
+                       actual_hmf: "float | None", actual_sugar=None) -> dict:
     """Pure scoring — NO db write. Sucrose EXCLUDED from phys_match this sprint
     (model target mislabeled); accepted only so callers can pass it without error."""
     _ensure_loaded()
+    # prediction["predicted_moisture"] and prediction["predicted_hmf"] are required keys
+    # ([] access by design — callers must supply them); triangulation/confidence are optional (.get).
 
     # Our lab form makes the 5 metrics optional, so any actual_* can be None.
     # Skip absent metrics rather than treating them as deviation-from-0 (which
@@ -268,12 +266,14 @@ def compute_validation(
     ]:
         if actual is None:
             continue
-        dev = abs(actual - (pred_val or 0))
+        dev = abs(actual - (pred_val if pred_val is not None else 0))
         ps.append(max(0.0, 1.0 - dev / (2 * TOLERANCES[tol_key])))
 
     mean_phys = float(np.mean(ps)) if ps else 0.5
-    tri       = prediction.get("triangulation_score") or 0.5
-    conf      = prediction.get("confidence_score") or 0.5
+    tri = prediction.get("triangulation_score")
+    tri = 0.5 if tri is None else tri
+    conf = prediction.get("confidence_score")
+    conf = 0.5 if conf is None else conf
     auth      = round(float(np.clip(mean_phys*0.50 + tri*0.35 + conf*0.15, 0, 1)), 4)
     status    = "verified"   if auth >= 0.80 else \
                 "suspicious" if auth >= THRESHOLD else "flagged"
