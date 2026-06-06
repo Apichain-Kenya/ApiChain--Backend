@@ -122,7 +122,7 @@ def _encode_safe(encoder, value, fallback=0):
     try:    return int(encoder.transform([value])[0])
     except: return fallback
 
-def _triangulation(lat, lon, month, vegetation_type, pollen_density):
+def _triangulation(lat, lon, month, vegetation_type, pollen_density=None):
     region   = _get_region(lat, lon)
     expected = _get_flowering(lat, lon, month)
     n_exp    = len(expected)
@@ -133,7 +133,11 @@ def _triangulation(lat, lon, month, vegetation_type, pollen_density):
     dist_score   = max(0.0, 1.0 - dist_km / 200)
     flower_align = min(1.0, n_exp / 3.0) if n_exp > 0 else 0.1
     exp_pollen   = n_exp * 8000
-    pollen_cons  = 1.0 if pollen_density >= exp_pollen else pollen_density / max(exp_pollen, 1)
+    # Decoupled: if no measured pollen is supplied, use the region-expected value
+    # so pollen consistency is neutral (1.0) and the prediction is independent of
+    # the lab pollen it will later be compared against.
+    eff_pollen   = exp_pollen if pollen_density is None else pollen_density
+    pollen_cons  = 1.0 if eff_pollen >= exp_pollen else eff_pollen / max(exp_pollen, 1)
 
     score = flora_match*0.35 + dist_score*0.25 + flower_align*0.25 + pollen_cons*0.15
     return {
@@ -147,16 +151,16 @@ def _triangulation(lat, lon, month, vegetation_type, pollen_density):
     }
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
-def predict_and_save(
-    db: Session,
-    batch_id: int,
+# ── Pure compute functions (no DB, no side effects) ───────────────────────────
+
+def compute_prediction(
     latitude: float, longitude: float, altitude: float,
     vegetation_type: str, harvest_date: datetime,
     temperature: float, humidity: float, rainfall: float,
-    ndvi: float, pollen_density: float,
-) -> GeoAIPrediction:
-
+    ndvi: float,
+) -> dict:
+    """Pure prediction — NO db write, NO lab pollen. Returns predicted_* +
+    confidence + triangulation components."""
     _ensure_loaded()
 
     month  = harvest_date.month
@@ -172,7 +176,9 @@ def predict_and_save(
     # teammate's training setup. See reference_geoai_model_contract (auto-memory).
     vegetation_type = region
 
-    tri    = _triangulation(latitude, longitude, month, vegetation_type, pollen_density)
+    # pollen_density=None so prediction is independent of the lab pollen it will
+    # later be compared against (decoupled per Sprint 13 design).
+    tri = _triangulation(latitude, longitude, month, vegetation_type, pollen_density=None)
 
     # Compute sugar_boost from flowering calendar (generated, not from lab)
     flowering         = _get_flowering(latitude, longitude, month)
@@ -223,18 +229,116 @@ def predict_and_save(
 
     conf = round(float(np.clip(1.0 - np.mean(errors), 0, 1)), 4)
 
+    return {
+        "predicted_moisture":  preds["predicted_moisture"],
+        "predicted_sugar":     preds["predicted_sugar"],
+        "predicted_hmf":       preds["predicted_hmf"],
+        "confidence_score":    conf,
+        "region_detected":     tri["region_detected"],
+        "flowering_species":   ",".join(tri["flowering_species"]),
+        "triangulation_score": tri["triangulation_score"],
+        "flora_match_score":   tri["flora_match_score"],
+        "dist_to_zone_km":     tri["dist_to_zone_km"],
+        "n_flowering_species": tri["n_flowering_species"],
+    }
+
+
+def compute_validation(
+    prediction: dict,
+    actual_moisture: float,
+    actual_hmf: float,
+    actual_sugar=None,
+) -> dict:
+    """Pure scoring — NO db write. Sucrose EXCLUDED from phys_match this sprint
+    (model target mislabeled); accepted only so callers can pass it without error."""
+    _ensure_loaded()
+
+    # Our lab form makes the 5 metrics optional, so any actual_* can be None.
+    # Skip absent metrics rather than treating them as deviation-from-0 (which
+    # would unfairly tank the score). If ALL metrics are absent there is no
+    # physical evidence to compare, so phys_match falls back to a neutral 0.5
+    # and the authenticity score leans on triangulation + confidence instead.
+    # Sucrose is intentionally excluded this sprint — the sucrose_level model
+    # target predicts total sugar (~75) not true sucrose (~4), so it unfairly
+    # penalises genuine honey. Sugar passes through (stored/anchored) but not scored.
+    ps = []
+    for actual, pred_val, tol_key in [
+        (actual_moisture, prediction["predicted_moisture"], "moisture_content"),
+        (actual_hmf,      prediction["predicted_hmf"],      "hmf_level"),
+    ]:
+        if actual is None:
+            continue
+        dev = abs(actual - (pred_val or 0))
+        ps.append(max(0.0, 1.0 - dev / (2 * TOLERANCES[tol_key])))
+
+    mean_phys = float(np.mean(ps)) if ps else 0.5
+    tri       = prediction.get("triangulation_score") or 0.5
+    conf      = prediction.get("confidence_score") or 0.5
+    auth      = round(float(np.clip(mean_phys*0.50 + tri*0.35 + conf*0.15, 0, 1)), 4)
+    status    = "verified"   if auth >= 0.80 else \
+                "suspicious" if auth >= THRESHOLD else "flagged"
+    return {
+        "authenticity_score": auth,
+        "is_valid":           auth >= THRESHOLD,
+        "validation_status":  status,
+        "phys_match_score":   round(mean_phys, 4),
+        "triangulation_score": round(tri, 4),
+        "confidence_score":   round(conf, 4),
+    }
+
+
+def build_explanation(
+    prediction: dict,
+    validation: dict,
+    actual_moisture,
+    actual_hmf,
+) -> str:
+    """Deterministic, offline, English rule-based explanation. Anchored on chain
+    as a proof artifact (English is fine — the consumer view localizes the BAND,
+    not this prose). Built only from rounded components, so re-running it server-
+    side at submit reproduces the exact string hashed."""
+    region   = prediction.get("region_detected") or "unknown"
+    tri      = prediction.get("triangulation_score") or 0.0
+    tri_word = "strong" if tri >= 0.7 else "moderate" if tri >= 0.4 else "weak"
+    pm       = prediction.get("predicted_moisture")
+    ph       = prediction.get("predicted_hmf")
+    status   = validation.get("validation_status", "flagged")
+    am       = "n/a" if actual_moisture is None else actual_moisture
+    ah       = "n/a" if actual_hmf is None else actual_hmf
+    return (
+        f"Origin region detected: {region}. "
+        f"Moisture {am} vs expected {pm}; HMF {ah} vs expected {ph}. "
+        f"{tri_word.capitalize()} origin triangulation ({round(tri*100)}%). "
+        f"Sugar measured but not scored (model target under review). "
+        f"Verdict: {status}."
+    )
+
+
+# ── Persist wrappers (thin shell over compute fns) ────────────────────────────
+
+def predict_and_save(
+    db: Session,
+    batch_id: int,
+    latitude: float, longitude: float, altitude: float,
+    vegetation_type: str, harvest_date: datetime,
+    temperature: float, humidity: float, rainfall: float,
+    ndvi: float, pollen_density: float,
+) -> GeoAIPrediction:
+    # pollen_density kept in signature for back-compat but no longer used (decoupled)
+    p = compute_prediction(latitude, longitude, altitude, vegetation_type,
+                           harvest_date, temperature, humidity, rainfall, ndvi)
     record = GeoAIPrediction(
         batch_id            = batch_id,
-        predicted_moisture  = preds["predicted_moisture"],
-        predicted_sugar     = preds["predicted_sugar"],
-        predicted_hmf       = preds["predicted_hmf"],
-        confidence_score    = conf,
-        region_detected     = tri["region_detected"],
-        flowering_species   = ",".join(tri["flowering_species"]),
-        triangulation_score = tri["triangulation_score"],
-        flora_match_score   = tri["flora_match_score"],
-        dist_to_zone_km     = tri["dist_to_zone_km"],
-        n_flowering_species = tri["n_flowering_species"],
+        predicted_moisture  = p["predicted_moisture"],
+        predicted_sugar     = p["predicted_sugar"],
+        predicted_hmf       = p["predicted_hmf"],
+        confidence_score    = p["confidence_score"],
+        region_detected     = p["region_detected"],
+        flowering_species   = p["flowering_species"],
+        triangulation_score = p["triangulation_score"],
+        flora_match_score   = p["flora_match_score"],
+        dist_to_zone_km     = p["dist_to_zone_km"],
+        n_flowering_species = p["n_flowering_species"],
     )
     db.add(record)
     db.commit()
@@ -250,44 +354,23 @@ def validate_and_save(
     actual_sugar: float,
     actual_hmf: float,
 ) -> ValidationResult:
-
-    _ensure_loaded()
-
-    # Our lab form makes the 5 metrics optional, so any actual_* can be None.
-    # Skip absent metrics rather than treating them as deviation-from-0 (which
-    # would unfairly tank the score). If ALL three are absent there is no
-    # physical evidence to compare, so phys_match falls back to a neutral 0.5
-    # and the authenticity score leans on triangulation + confidence instead.
-    ps = []
-    for actual, pred_val, tol_key in [
-        (actual_moisture, prediction.predicted_moisture, "moisture_content"),
-        (actual_sugar,    prediction.predicted_sugar,    "sucrose_level"),
-        (actual_hmf,      prediction.predicted_hmf,      "hmf_level"),
-    ]:
-        if actual is None:
-            continue
-        dev = abs(actual - (pred_val or 0))
-        ps.append(max(0.0, 1.0 - dev / (2 * TOLERANCES[tol_key])))
-
-    mean_phys  = float(np.mean(ps)) if ps else 0.5
-    tri_score  = prediction.triangulation_score or 0.5
-    conf       = prediction.confidence_score or 0.5
-    auth_score = round(float(np.clip(
-        mean_phys*0.50 + tri_score*0.35 + conf*0.15, 0, 1
-    )), 4)
-    is_valid = auth_score >= THRESHOLD
-    status   = "verified"   if auth_score >= 0.80 else \
-               "suspicious" if auth_score >= THRESHOLD else "flagged"
-
+    pred_dict = {
+        "predicted_moisture":  prediction.predicted_moisture,
+        "predicted_sugar":     prediction.predicted_sugar,
+        "predicted_hmf":       prediction.predicted_hmf,
+        "triangulation_score": prediction.triangulation_score,
+        "confidence_score":    prediction.confidence_score,
+    }
+    v = compute_validation(pred_dict, actual_moisture, actual_hmf, actual_sugar)
     record = ValidationResult(
         batch_id            = batch_id,
         prediction_id       = prediction.id,
-        authenticity_score  = auth_score,
-        is_valid            = is_valid,
-        validation_status   = status,
-        phys_match_score    = round(mean_phys, 4),
-        triangulation_score = round(tri_score, 4),
-        confidence_score    = round(conf, 4),
+        authenticity_score  = v["authenticity_score"],
+        is_valid            = v["is_valid"],
+        validation_status   = v["validation_status"],
+        phys_match_score    = v["phys_match_score"],
+        triangulation_score = v["triangulation_score"],
+        confidence_score    = v["confidence_score"],
     )
     db.add(record)
     db.commit()
