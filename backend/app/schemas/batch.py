@@ -109,23 +109,38 @@ class ProcessingRequest(BaseModel):
 
 
 class LabVerifyRequest(BaseModel):
-    """Data for anchoring lab proof (S2→S3). Oracle-signed.
-
-    Fields mirror the `lab_results` table columns so the persisted row is the
-    canonical pre-image of the on-chain proof hash. See `app/models/lab_result.py`.
-    """
+    """Tester-entered actual metrics (S2→S3). Authenticity (predicted_*, score,
+    validation_status, explanation) is computed server-side and is NOT accepted
+    from the client — the server never trusts a client-passed score."""
     moisture_content: Optional[float] = Field(default=None, ge=0, le=100)
     sucrose_level: Optional[float] = Field(default=None, ge=0)
     hmf_level: Optional[float] = Field(default=None, ge=0)
     pollen_density: Optional[float] = Field(default=None, ge=0)
-    purity_score: Optional[float] = Field(default=None, ge=0, le=100)
-
-    passed_quality_check: bool
-
     laboratory_name: Optional[str] = None
     analyst_name: Optional[str] = None
     certificate_number: Optional[str] = None
     notes: Optional[str] = None
+
+
+class LabPreviewRequest(BaseModel):
+    """Actual metrics the tester entered, for a non-persisting authenticity preview."""
+    moisture_content: Optional[float] = Field(default=None, ge=0, le=100)
+    sucrose_level: Optional[float] = Field(default=None, ge=0)
+    hmf_level: Optional[float] = Field(default=None, ge=0)
+    pollen_density: Optional[float] = Field(default=None, ge=0)
+
+
+class LabPreviewResponse(BaseModel):
+    predicted_moisture: Optional[float] = None
+    predicted_sugar: Optional[float] = None
+    predicted_hmf: Optional[float] = None
+    authenticity_score: Optional[float] = None
+    validation_status: Optional[str] = None
+    explanation: Optional[str] = None
+    region_detected: Optional[str] = None
+    triangulation_score: Optional[float] = None
+    confidence_score: Optional[float] = None
+    phys_match_score: Optional[float] = None
 
 
 class PackagingRequest(BaseModel):
@@ -218,16 +233,18 @@ class BatchHashesResponse(BaseModel):
 
 
 class LabResultPublic(BaseModel):
-    """Persisted lab_results row exposed by the public verify endpoint."""
     model_config = ConfigDict(from_attributes=True)
-
     batch_id: int
     moisture_content: Optional[float] = None
     sucrose_level: Optional[float] = None
     hmf_level: Optional[float] = None
     pollen_density: Optional[float] = None
-    purity_score: Optional[float] = None
-    passed_quality_check: bool
+    predicted_moisture: Optional[float] = None
+    predicted_sugar: Optional[float] = None
+    predicted_hmf: Optional[float] = None
+    authenticity_score: Optional[float] = None
+    validation_status: Optional[str] = None
+    explanation: Optional[str] = None
     laboratory_name: Optional[str] = None
     analyst_name: Optional[str] = None
     certificate_number: Optional[str] = None
