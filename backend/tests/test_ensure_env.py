@@ -45,3 +45,15 @@ def test_fetches_and_persists_when_missing(monkeypatch):
     env = _ensure_environmental_data(db, batch)
     assert env is not None and env.temperature == 22.0
     assert len(db.added) == 1
+
+
+def test_no_apiary_id_returns_none():
+    db = _DB(env_existing=None, apiary=None)
+    batch = SimpleNamespace(id=1, apiary_id=None)
+    assert _ensure_environmental_data(db, batch) is None
+
+
+def test_apiary_not_found_returns_none():
+    db = _DB(env_existing=None, apiary=None)
+    batch = SimpleNamespace(id=1, apiary_id=99)
+    assert _ensure_environmental_data(db, batch) is None

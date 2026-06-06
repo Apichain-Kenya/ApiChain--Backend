@@ -30,7 +30,6 @@ from app.models.distribution_record import DistributionRecord
 from app.schemas.batch import (
     ApiaryRecordPublic,
     AuthenticityPublic,
-    BatchAuthenticitySummary,
     BatchCreateRequest,
     BatchMetadataInput,
     BatchMetadataPublic,

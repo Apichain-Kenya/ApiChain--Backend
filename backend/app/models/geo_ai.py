@@ -1,6 +1,6 @@
 # app/models/geo_ai.py
 from sqlalchemy import Column, Integer, Float, String, Boolean, DateTime, ForeignKey
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from datetime import datetime, timezone
 from app.database import Base
 
@@ -52,5 +52,5 @@ class ValidationResult(Base):
 
     validated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
-    batch      = relationship("HoneyBatch", backref="validation")
+    batch      = relationship("HoneyBatch", backref=backref("validation", uselist=False))
     prediction = relationship("GeoAIPrediction", back_populates="validation")
