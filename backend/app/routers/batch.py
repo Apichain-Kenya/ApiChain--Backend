@@ -479,22 +479,22 @@ def record_processing(
 # ------------------------------------------------------------------
 
 def _lab_result_canonical_payload(row: LabResult) -> dict:
-    """Build the deterministic pre-image dict used for `proofHash`.
-
-    The persisted row is the single source of truth — re-running this on the
-    DB row at QR-verification time must reproduce the exact bytes that were
-    hashed at lab-verify time. Only stable, oracle-anchored columns are
-    included; `id`, `tested_at`, and `lab_proof_hash` are excluded (the first
-    two are DB-assigned post-hash; the third IS the hash).
-    """
+    """Sprint 13 pre-image. Drops purity_score + passed_quality_check; adds the
+    anchored GeoAI authenticity fields. Existing measured metrics stay native
+    float (proven on Sepolia); the new ML floats route through _q4 (type-stable).
+    `explanation` + `validation_status` are stored strings — round-trip identical."""
     return {
         "batch_id": row.batch_id,
         "moisture_content": row.moisture_content,
         "sucrose_level": row.sucrose_level,
         "hmf_level": row.hmf_level,
         "pollen_density": row.pollen_density,
-        "purity_score": row.purity_score,
-        "passed_quality_check": row.passed_quality_check,
+        "predicted_moisture": _q4(row.predicted_moisture),
+        "predicted_sugar": _q4(row.predicted_sugar),
+        "predicted_hmf": _q4(row.predicted_hmf),
+        "authenticity_score": _q4(row.authenticity_score),
+        "validation_status": row.validation_status,
+        "explanation": row.explanation,
         "laboratory_name": row.laboratory_name,
         "analyst_name": row.analyst_name,
         "certificate_number": row.certificate_number,
@@ -515,6 +515,15 @@ def _canonical_dt(dt) -> str | None:
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt.isoformat()
+
+
+def _q4(x) -> str | None:
+    """Render an ML-derived numeric as a fixed-precision (4dp) string so the
+    canonical hash is independent of float-vs-Decimal column typing. Mirrors the
+    expected_yield_kg quantize pattern in _metadata_record_canonical_payload."""
+    if x is None:
+        return None
+    return str(Decimal(str(x)).quantize(Decimal("0.0001")))
 
 
 def _apiary_record_canonical_payload(row: ApiaryRecord) -> dict:
