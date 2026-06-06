@@ -382,11 +382,21 @@ class TxHashes(BaseModel):
 
 class AuthenticityPublic(BaseModel):
     """Consumer-facing GeoAI authenticity summary on /verify. Joined from
-    validation_results by batch.id. Chain-neutral (no hashed field)."""
+    validation_results / lab_results. Chain-neutral (no hashed field)."""
     available: bool
-    status: Optional[str] = None   # "verified" | "suspicious" | "flagged"
-    score: Optional[float] = None  # authenticity_score (0..1)
+    status: Optional[str] = None     # raw: verified|suspicious|flagged (dashboards)
+    score: Optional[float] = None    # raw 0..1 (dashboards; consumer never shows)
+    band: Optional[str] = None       # consumer-safe: consistent|under_review
+    explanation: Optional[str] = None  # anchored English proof statement
     model_config = ConfigDict(from_attributes=True)
+
+
+class ConsumerView(BaseModel):
+    """Consumer scan-page block. NEVER exposes the raw score or the word 'flagged'."""
+    place: Optional[str] = None
+    producer_label: str = "a verified ApiChain beekeeper"
+    authenticity_band: Optional[str] = None      # consistent|under_review
+    authenticity_explanation: Optional[str] = None
 
 
 class BatchVerifyResponse(BaseModel):
@@ -408,6 +418,7 @@ class BatchVerifyResponse(BaseModel):
     verification: Optional[VerificationBlock] = None
     tx_hashes: Optional[TxHashes] = None
     authenticity: Optional[AuthenticityPublic] = None
+    consumer: Optional[ConsumerView] = None
 
 
 class SimpleBatchCreateRequest(BaseModel):

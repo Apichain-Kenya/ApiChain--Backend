@@ -39,6 +39,7 @@ from app.schemas.batch import (
     BatchHashesResponse,
     BatchTimelineResponse,
     BatchVerifyResponse,
+    ConsumerView,
     DistributionRecordPublic,
     DistributionRequest,
     EnvironmentalDataPublic,
@@ -125,6 +126,17 @@ def _check_blockchain():
             status_code=503,
             detail="Contract addresses not configured. Set REGISTRY_ADDRESS and ROLE_MANAGER_ADDRESS in .env",
         )
+
+
+def _authenticity_band(status: str | None) -> str | None:
+    """Map the raw validation status to a consumer-safe band. Consumers must
+    never see the raw score or the word 'flagged'. verified -> consistent;
+    suspicious/flagged -> under_review; unknown/None -> None."""
+    if status == "verified":
+        return "consistent"
+    if status in ("suspicious", "flagged"):
+        return "under_review"
+    return None
 
 
 def _batch_id_to_bytes(batch_id: str) -> bytes:
@@ -1127,6 +1139,7 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
     verification: VerificationBlock | None = None
     tx_hashes: TxHashes | None = None
     authenticity: AuthenticityPublic | None = None
+    consumer: ConsumerView | None = None
 
     if batch is not None:
         tx_hashes = TxHashes(
@@ -1140,15 +1153,43 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
 
         # GeoAI authenticity summary (chain-neutral): joined from
         # validation_results by integer batch.id. Absent until validate runs.
+        # band + explanation sourced preferentially from the anchored lab_results
+        # row (provable), falling back to the validation row.
         _val = (
             db.query(ValidationResult)
             .filter(ValidationResult.batch_id == batch.id)
             .first()
         )
+        lab_row = batch.lab_result
+        _status = (lab_row.validation_status if lab_row else None) or (
+            _val.validation_status if _val else None
+        )
+        _expl = lab_row.explanation if lab_row else None
+        _score = (
+            lab_row.authenticity_score
+            if lab_row and lab_row.authenticity_score is not None
+            else (_val.authenticity_score if _val else None)
+        )
+        _band = _authenticity_band(_status)
         authenticity = AuthenticityPublic(
-            available=_val is not None,
-            status=_val.validation_status if _val else None,
-            score=_val.authenticity_score if _val else None,
+            available=(_val is not None) or (
+                lab_row is not None and lab_row.authenticity_score is not None
+            ),
+            status=_status,
+            score=_score,
+            band=_band,
+            explanation=_expl,
+        )
+        _place = None
+        if batch.apiary_record is not None:
+            from app.services.geocode import reverse_geocode
+            _place = reverse_geocode(
+                batch.apiary_record.latitude, batch.apiary_record.longitude
+            )
+        consumer = ConsumerView(
+            place=_place,
+            authenticity_band=_band,
+            authenticity_explanation=_expl,
         )
 
         v_kwargs: dict = {}
@@ -1222,6 +1263,7 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
         verification=verification,
         tx_hashes=tx_hashes,
         authenticity=authenticity,
+        consumer=consumer,
     )
 
 
