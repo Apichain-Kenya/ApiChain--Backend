@@ -42,3 +42,29 @@ def test_dropped_fields_are_not_in_payload():
     assert "passed_quality_check" not in payload
     assert {"predicted_moisture", "authenticity_score", "validation_status",
             "explanation"} <= set(payload)
+
+
+def test_measured_metrics_are_native_float_not_quantized():
+    # The four MEASURED metrics must stay native float (the Sepolia-proven path).
+    # If a maintainer ever wraps these in _q4, every historical lab hash on the
+    # re-verification path silently changes — this guards against that.
+    payload = _lab_result_canonical_payload(_row())
+    assert isinstance(payload["moisture_content"], float)
+    assert isinstance(payload["sucrose_level"], float)
+    assert isinstance(payload["hmf_level"], float)
+    assert isinstance(payload["pollen_density"], float)
+    # And the ML-derived fields must be quantized STRINGS, not floats.
+    assert isinstance(payload["predicted_moisture"], str)
+    assert isinstance(payload["authenticity_score"], str)
+
+
+def test_all_none_ml_fields_hash_stably_and_use_none_not_string():
+    # A row whose ML fields are all None (e.g. a lab row created before authenticity
+    # is computed) must hash reproducibly, and None must serialize as JSON null,
+    # NOT the string "None".
+    r = _row(predicted_moisture=None, predicted_sugar=None,
+             predicted_hmf=None, authenticity_score=None)
+    assert _h(r) == _h(r)
+    payload = _lab_result_canonical_payload(r)
+    assert payload["predicted_moisture"] is None
+    assert payload["authenticity_score"] is None

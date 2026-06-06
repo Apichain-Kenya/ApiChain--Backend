@@ -233,6 +233,7 @@ class BatchHashesResponse(BaseModel):
 
 
 class LabResultPublic(BaseModel):
+    """Persisted lab_results row exposed by the public verify endpoint."""
     model_config = ConfigDict(from_attributes=True)
     batch_id: int
     moisture_content: Optional[float] = None
