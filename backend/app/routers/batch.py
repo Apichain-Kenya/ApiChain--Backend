@@ -7,6 +7,7 @@ and on-chain by the smart contract's role checks.
 """
 
 import logging
+import math
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -526,6 +527,18 @@ def _q4(x) -> str | None:
     return str(Decimal(str(x)).quantize(Decimal("0.0001")))
 
 
+def _reject_non_finite(named_values: dict) -> None:
+    """Refuse to anchor non-finite ML output. A nan serializes to the string 'NaN'
+    (silently anchoring garbage as 'verified'); an inf crashes _q4's Decimal.quantize.
+    Either way it must not reach the chain."""
+    for name, v in named_values.items():
+        if v is not None and (math.isnan(v) or math.isinf(v)):
+            raise HTTPException(
+                status_code=503,
+                detail=f"GeoAI returned a non-finite {name}; refusing to anchor.",
+            )
+
+
 def _apiary_record_canonical_payload(row: ApiaryRecord) -> dict:
     """Pre-image dict for `apiaryHash` anchored at S0.
 
@@ -703,16 +716,13 @@ def anchor_lab_proof(
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles(["lab_test_officer", "admin", "super_admin"])),
 ):
-    """Anchor lab verification proof (S2→S3).
+    """Anchor lab verification proof (S2→S3) with server-computed GeoAI authenticity.
 
-    Signs with the system oracle key, deliberately bypassing
-    `_get_user_signing_key()` — ORACLE_ROLE is one trusted EOA, not a user
-    identity. See `blockchain_service.anchor_lab_proof` for details.
-
-    Flow: validate state → INSERT lab_results row (flushed but uncommitted) →
-    hash the persisted row → anchor on chain → store hash on row + tx on
-    batch → commit. If the chain call fails, the inserted row is rolled back
-    so no unanchored lab result is persisted.
+    Sprint 13: the server AUTHORITATIVELY recomputes the GeoAI prediction + score +
+    explanation from the batch's apiary/env (never trusts a client-passed score),
+    persists them into lab_results (the anchored row) AND into geo_ai_predictions /
+    validation_results (sole writer), then hashes the new canonical pre-image and
+    anchors it via the system oracle key. Rollback on chain failure; 202 on pending.
     """
     _check_blockchain()
 
@@ -728,10 +738,69 @@ def anchor_lab_proof(
     if existing:
         raise HTTPException(status_code=409, detail="Lab result already exists for this batch")
 
-    # Insert + flush so DB-assigned columns (id, tested_at) are populated, but
-    # do NOT commit until the chain anchor succeeds.
-    row = LabResult(batch_id=batch.id, **data.model_dump())
+    # Ensure env (idempotent — preview already persisted it; reuse the SAME snapshot
+    # so the anchored prediction == what the tester previewed).
+    env = _ensure_environmental_data(db, batch)
+    if env is None:
+        raise HTTPException(status_code=400, detail="Environmental data unavailable (no apiary coords)")
+    apiary = db.query(ApiaryLocation).filter(ApiaryLocation.id == batch.apiary_id).first()
+    if apiary is None:
+        raise HTTPException(status_code=400, detail="Apiary not recorded for this batch")
+
+    # Server authoritatively recomputes (deterministic → matches preview); never
+    # trusts a client-passed score.
+    from app.services.geo_ai import (
+        compute_prediction, compute_validation, build_explanation, GeoAIModelError,
+    )
+    from app.models.geo_ai import GeoAIPrediction, ValidationResult
+    try:
+        pred = compute_prediction(
+            latitude=apiary.latitude, longitude=apiary.longitude,
+            altitude=apiary.altitude or 1000.0,
+            vegetation_type=apiary.vegetation_type or "unknown",
+            harvest_date=batch.harvested_at or batch.created_at,
+            temperature=env.temperature or 22.0, humidity=env.humidity or 65.0,
+            rainfall=env.rainfall or 80.0, ndvi=0.55,
+        )
+        val = compute_validation(pred, actual_moisture=data.moisture_content,
+                                 actual_hmf=data.hmf_level, actual_sugar=data.sucrose_level)
+    except GeoAIModelError as e:
+        raise HTTPException(status_code=503, detail=f"GeoAI model unavailable: {e}")
+    explanation = build_explanation(pred, val, data.moisture_content, data.hmf_level)
+
+    _reject_non_finite({
+        "predicted_moisture": pred["predicted_moisture"],
+        "predicted_sugar": pred["predicted_sugar"],
+        "predicted_hmf": pred["predicted_hmf"],
+        "authenticity_score": val["authenticity_score"],
+    })
+
+    # Persist lab_results WITH authenticity (the anchored row).
+    row = LabResult(
+        batch_id=batch.id,
+        moisture_content=data.moisture_content, sucrose_level=data.sucrose_level,
+        hmf_level=data.hmf_level, pollen_density=data.pollen_density,
+        predicted_moisture=pred["predicted_moisture"], predicted_sugar=pred["predicted_sugar"],
+        predicted_hmf=pred["predicted_hmf"], authenticity_score=val["authenticity_score"],
+        validation_status=val["validation_status"], explanation=explanation,
+        laboratory_name=data.laboratory_name, analyst_name=data.analyst_name,
+        certificate_number=data.certificate_number, notes=data.notes,
+    )
     db.add(row)
+    db.flush()
+
+    # Sole writer of the geo rows (so /verify authenticity + /geo-ai/result keep
+    # working). Staged in the SAME tx → chain failure rolls these back too.
+    geo_pred = GeoAIPrediction(batch_id=batch.id, **{
+        k: pred[k] for k in ("predicted_moisture","predicted_sugar","predicted_hmf",
+                             "confidence_score","region_detected","flowering_species",
+                             "triangulation_score","flora_match_score","dist_to_zone_km",
+                             "n_flowering_species")})
+    db.add(geo_pred)
+    db.flush()
+    db.add(ValidationResult(batch_id=batch.id, prediction_id=geo_pred.id, **{
+        k: val[k] for k in ("authenticity_score","is_valid","validation_status",
+                            "phys_match_score","triangulation_score","confidence_score")}))
     db.flush()
 
     proof_payload = _lab_result_canonical_payload(row)
@@ -763,7 +832,7 @@ def anchor_lab_proof(
         batch_id=batch_id,
         tx_hash=tx_hash,
         new_state="LAB_VERIFIED",
-        message="Lab proof anchored on-chain by oracle",
+        message="Lab proof anchored on-chain by oracle (authenticity recomputed server-side)",
     )
 
 
