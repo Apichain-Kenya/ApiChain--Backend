@@ -4,9 +4,6 @@ import numpy as np
 from math import radians, sin, cos, sqrt, atan2
 from pathlib import Path
 from datetime import datetime
-from sqlalchemy.orm import Session
-
-from app.models.geo_ai import GeoAIPrediction, ValidationResult
 
 ML_DIR = Path(__file__).parent.parent / "ml_models"
 
@@ -314,65 +311,3 @@ def build_explanation(
     )
 
 
-# ── Persist wrappers (thin shell over compute fns) ────────────────────────────
-
-def predict_and_save(
-    db: Session,
-    batch_id: int,
-    latitude: float, longitude: float, altitude: float,
-    vegetation_type: str, harvest_date: datetime,
-    temperature: float, humidity: float, rainfall: float,
-    ndvi: float, pollen_density: float,
-) -> GeoAIPrediction:
-    # pollen_density kept in signature for back-compat but no longer used (decoupled)
-    p = compute_prediction(latitude, longitude, altitude, vegetation_type,
-                           harvest_date, temperature, humidity, rainfall, ndvi)
-    record = GeoAIPrediction(
-        batch_id            = batch_id,
-        predicted_moisture  = p["predicted_moisture"],
-        predicted_sugar     = p["predicted_sugar"],
-        predicted_hmf       = p["predicted_hmf"],
-        confidence_score    = p["confidence_score"],
-        region_detected     = p["region_detected"],
-        flowering_species   = p["flowering_species"],
-        triangulation_score = p["triangulation_score"],
-        flora_match_score   = p["flora_match_score"],
-        dist_to_zone_km     = p["dist_to_zone_km"],
-        n_flowering_species = p["n_flowering_species"],
-    )
-    db.add(record)
-    db.commit()
-    db.refresh(record)
-    return record
-
-
-def validate_and_save(
-    db: Session,
-    batch_id: int,
-    prediction: GeoAIPrediction,
-    actual_moisture: float,
-    actual_sugar: float,
-    actual_hmf: float,
-) -> ValidationResult:
-    pred_dict = {
-        "predicted_moisture":  prediction.predicted_moisture,
-        "predicted_sugar":     prediction.predicted_sugar,
-        "predicted_hmf":       prediction.predicted_hmf,
-        "triangulation_score": prediction.triangulation_score,
-        "confidence_score":    prediction.confidence_score,
-    }
-    v = compute_validation(pred_dict, actual_moisture, actual_hmf, actual_sugar)
-    record = ValidationResult(
-        batch_id            = batch_id,
-        prediction_id       = prediction.id,
-        authenticity_score  = v["authenticity_score"],
-        is_valid            = v["is_valid"],
-        validation_status   = v["validation_status"],
-        phys_match_score    = v["phys_match_score"],
-        triangulation_score = v["triangulation_score"],
-        confidence_score    = v["confidence_score"],
-    )
-    db.add(record)
-    db.commit()
-    db.refresh(record)
-    return record

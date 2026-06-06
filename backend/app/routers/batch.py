@@ -59,6 +59,10 @@ from app.models.eth_wallet import EthWallet
 from app.services.blockchain import blockchain_service, ReceiptPendingError
 from app.services.encryption import decrypt_private_key
 from app.services.environment import fetch_environment_snapshot
+from app.services.geo_ai import (
+    compute_prediction, compute_validation, build_explanation, GeoAIModelError,
+)
+from app.models.geo_ai import GeoAIPrediction, ValidationResult
 
 logger = logging.getLogger(__name__)
 
@@ -539,6 +543,35 @@ def _reject_non_finite(named_values: dict) -> None:
             )
 
 
+def _compute_authenticity(batch, apiary, env, moisture_content, hmf_level, sucrose_level):
+    """Server-authoritative GeoAI compute shared by the lab PREVIEW and the
+    lab-verify ANCHOR, so the previewed score is EXACTLY what gets anchored — a
+    single source of truth for the inputs/defaults removes preview-vs-submit drift.
+    Pure compute (no DB write). Raises HTTPException(503) on model error or
+    non-finite output. Returns (pred, val, explanation)."""
+    try:
+        pred = compute_prediction(
+            latitude=apiary.latitude, longitude=apiary.longitude,
+            altitude=apiary.altitude or 1000.0,
+            vegetation_type=apiary.vegetation_type or "unknown",
+            harvest_date=batch.harvested_at or batch.created_at,
+            temperature=env.temperature or 22.0, humidity=env.humidity or 65.0,
+            rainfall=env.rainfall or 80.0, ndvi=0.55,
+        )
+        val = compute_validation(pred, actual_moisture=moisture_content,
+                                 actual_hmf=hmf_level, actual_sugar=sucrose_level)
+    except GeoAIModelError as e:
+        raise HTTPException(status_code=503, detail=f"GeoAI model unavailable: {e}")
+    explanation = build_explanation(pred, val, moisture_content, hmf_level)
+    _reject_non_finite({
+        "predicted_moisture": pred["predicted_moisture"],
+        "predicted_sugar": pred["predicted_sugar"],
+        "predicted_hmf": pred["predicted_hmf"],
+        "authenticity_score": val["authenticity_score"],
+    })
+    return pred, val, explanation
+
+
 def _apiary_record_canonical_payload(row: ApiaryRecord) -> dict:
     """Pre-image dict for `apiaryHash` anchored at S0.
 
@@ -738,6 +771,9 @@ def anchor_lab_proof(
     if existing:
         raise HTTPException(status_code=409, detail="Lab result already exists for this batch")
 
+    if db.query(GeoAIPrediction).filter(GeoAIPrediction.batch_id == batch.id).first():
+        raise HTTPException(status_code=409, detail="GeoAI prediction already exists for this batch")
+
     # Ensure env (idempotent — preview already persisted it; reuse the SAME snapshot
     # so the anchored prediction == what the tester previewed).
     env = _ensure_environmental_data(db, batch)
@@ -749,31 +785,9 @@ def anchor_lab_proof(
 
     # Server authoritatively recomputes (deterministic → matches preview); never
     # trusts a client-passed score.
-    from app.services.geo_ai import (
-        compute_prediction, compute_validation, build_explanation, GeoAIModelError,
+    pred, val, explanation = _compute_authenticity(
+        batch, apiary, env, data.moisture_content, data.hmf_level, data.sucrose_level
     )
-    from app.models.geo_ai import GeoAIPrediction, ValidationResult
-    try:
-        pred = compute_prediction(
-            latitude=apiary.latitude, longitude=apiary.longitude,
-            altitude=apiary.altitude or 1000.0,
-            vegetation_type=apiary.vegetation_type or "unknown",
-            harvest_date=batch.harvested_at or batch.created_at,
-            temperature=env.temperature or 22.0, humidity=env.humidity or 65.0,
-            rainfall=env.rainfall or 80.0, ndvi=0.55,
-        )
-        val = compute_validation(pred, actual_moisture=data.moisture_content,
-                                 actual_hmf=data.hmf_level, actual_sugar=data.sucrose_level)
-    except GeoAIModelError as e:
-        raise HTTPException(status_code=503, detail=f"GeoAI model unavailable: {e}")
-    explanation = build_explanation(pred, val, data.moisture_content, data.hmf_level)
-
-    _reject_non_finite({
-        "predicted_moisture": pred["predicted_moisture"],
-        "predicted_sugar": pred["predicted_sugar"],
-        "predicted_hmf": pred["predicted_hmf"],
-        "authenticity_score": val["authenticity_score"],
-    })
 
     # Persist lab_results WITH authenticity (the anchored row).
     row = LabResult(
@@ -1127,7 +1141,6 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
 
         # GeoAI authenticity summary (chain-neutral): joined from
         # validation_results by integer batch.id. Absent until validate runs.
-        from app.models.geo_ai import ValidationResult
         _val = (
             db.query(ValidationResult)
             .filter(ValidationResult.batch_id == batch.id)

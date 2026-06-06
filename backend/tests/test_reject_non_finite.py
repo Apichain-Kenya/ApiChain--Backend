@@ -19,3 +19,4 @@ def test_rejects_inf():
     with pytest.raises(HTTPException) as ei:
         _reject_non_finite({"predicted_moisture": float("inf")})
     assert ei.value.status_code == 503
+    assert "predicted_moisture" in str(ei.value.detail)

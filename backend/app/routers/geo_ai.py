@@ -9,10 +9,7 @@ from app.models.apiary import ApiaryLocation
 from app.models.geo_ai import GeoAIPrediction, ValidationResult
 from app.models.lab_result import LabResult
 from app.schemas.batch import LabPreviewRequest, LabPreviewResponse
-from app.services.geo_ai import (
-    compute_prediction, compute_validation, build_explanation, GeoAIModelError,
-)
-from app.routers.batch import _ensure_environmental_data
+from app.routers.batch import _ensure_environmental_data, _compute_authenticity
 
 router = APIRouter(prefix="/geo-ai", tags=["Geo-AI"])
 
@@ -42,21 +39,9 @@ def preview_authenticity(
         raise HTTPException(400, "Environmental data unavailable (no apiary coords)")
     db.commit()  # persist the env snapshot so submit reuses the same inputs
 
-    try:
-        pred = compute_prediction(
-            latitude=apiary.latitude, longitude=apiary.longitude,
-            altitude=apiary.altitude or 1000.0,
-            vegetation_type=apiary.vegetation_type or "unknown",
-            harvest_date=batch.harvested_at or batch.created_at,
-            temperature=env.temperature or 22.0, humidity=env.humidity or 65.0,
-            rainfall=env.rainfall or 80.0, ndvi=0.55,
-        )
-        val = compute_validation(pred, actual_moisture=data.moisture_content,
-                                 actual_hmf=data.hmf_level, actual_sugar=data.sucrose_level)
-    except GeoAIModelError as e:
-        raise HTTPException(503, f"GeoAI model unavailable: {e}")
-
-    explanation = build_explanation(pred, val, data.moisture_content, data.hmf_level)
+    pred, val, explanation = _compute_authenticity(
+        batch, apiary, env, data.moisture_content, data.hmf_level, data.sucrose_level
+    )
     return LabPreviewResponse(
         predicted_moisture=pred["predicted_moisture"],
         predicted_sugar=pred["predicted_sugar"],
