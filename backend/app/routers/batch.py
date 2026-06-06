@@ -139,6 +139,16 @@ def _authenticity_band(status: str | None) -> str | None:
     return None
 
 
+def _consumer_explanation(status: str | None, explanation: str | None) -> str | None:
+    """Consumer-safe explanation. The anchored proof statement ends with
+    'Verdict: {status}.', so for non-verified batches it contains the raw words
+    'suspicious'/'flagged' which consumers must not see. Only surface the prose
+    when the batch is verified; otherwise return None (the FE shows just the
+    neutral 'under review' band). Staff dashboards still get the full text via
+    AuthenticityPublic.explanation."""
+    return explanation if status == "verified" else None
+
+
 def _batch_id_to_bytes(batch_id: str) -> bytes:
     """Decode a batch_id hex string (with or without 0x prefix) into 32-byte form."""
     hex_part = batch_id[2:] if batch_id.startswith("0x") else batch_id
@@ -1189,7 +1199,7 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
         consumer = ConsumerView(
             place=_place,
             authenticity_band=_band,
-            authenticity_explanation=_expl,
+            authenticity_explanation=_consumer_explanation(_status, _expl),
         )
 
         v_kwargs: dict = {}
