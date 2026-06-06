@@ -30,6 +30,7 @@ from app.models.distribution_record import DistributionRecord
 from app.schemas.batch import (
     ApiaryRecordPublic,
     AuthenticityPublic,
+    BatchAuthenticitySummary,
     BatchCreateRequest,
     BatchMetadataInput,
     BatchMetadataPublic,
@@ -876,6 +877,43 @@ def record_distribution(
 # Read endpoints
 # ------------------------------------------------------------------
 
+def build_batch_view(batch) -> dict:
+    """Canonical batch shape the FE can trust. Sources `quantity` from the
+    harvest_record (the two-step create path never set batch.quantity, which is
+    the root of the FE quantity=0 bug), and joins the GeoAI authenticity summary
+    from the validation_results backref. Pure over attributes — unit-testable."""
+    harvest = getattr(batch, "harvest_record", None)
+    if harvest is not None and harvest.quantity_kg is not None:
+        quantity = harvest.quantity_kg
+    else:
+        quantity = batch.quantity
+    val = getattr(batch, "validation", None)
+    return {
+        "id": batch.id,
+        "blockchain_batch_id": batch.blockchain_batch_id,
+        "farmer_id": batch.farmer_id,
+        "current_state": batch.current_state,
+        "quantity": quantity,
+        "create_tx_hash": batch.create_tx_hash,
+        "harvest_tx_hash": batch.harvest_tx_hash,
+        "process_tx_hash": batch.process_tx_hash,
+        "lab_verify_tx_hash": batch.lab_verify_tx_hash,
+        "packaging_tx_hash": batch.packaging_tx_hash,
+        "distribution_tx_hash": batch.distribution_tx_hash,
+        "created_at": batch.created_at,
+        "harvested_at": batch.harvested_at,
+        "processed_at": batch.processed_at,
+        "lab_verified_at": batch.lab_verified_at,
+        "packaged_at": batch.packaged_at,
+        "distributed_at": batch.distributed_at,
+        "authenticity": {
+            "available": val is not None,
+            "status": val.validation_status if val else None,
+            "score": val.authenticity_score if val else None,
+        },
+    }
+
+
 @router.get("/", response_model=list[BatchResponse])
 def list_batches(
     skip: int = 0,
@@ -883,15 +921,12 @@ def list_batches(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """List batches from the database (paginated)."""
+    """List batches (paginated) in the canonical view-model shape."""
     batches = (
-        db.query(HoneyBatch)
-        .order_by(HoneyBatch.id.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
+        db.query(HoneyBatch).order_by(HoneyBatch.id.desc())
+        .offset(skip).limit(limit).all()
     )
-    return batches
+    return [build_batch_view(b) for b in batches]
 
 
 @router.get("/{batch_id}", response_model=BatchResponse)
@@ -900,13 +935,13 @@ def get_batch(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get batch details from the database."""
+    """Get batch detail in the canonical view-model shape."""
     batch = db.query(HoneyBatch).filter(
         HoneyBatch.blockchain_batch_id == batch_id
     ).first()
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
-    return batch
+    return build_batch_view(batch)
 
 
 @router.get("/{batch_id}/timeline", response_model=BatchTimelineResponse)
@@ -1229,4 +1264,4 @@ def create_simple_batch(
 
     _commit_or_orphan(db, batch_id_hex, harvest_tx)
     db.refresh(batch)
-    return batch
+    return build_batch_view(batch)

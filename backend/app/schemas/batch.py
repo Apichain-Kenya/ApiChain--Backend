@@ -157,6 +157,12 @@ class DistributionRequest(BaseModel):
 
 # -- Response schemas -------------------------------------------------------
 
+class BatchAuthenticitySummary(BaseModel):
+    available: bool
+    status: Optional[str] = None
+    score: Optional[float] = None
+
+
 class BatchResponse(BaseModel):
     """Full batch data returned by API."""
     model_config = ConfigDict(from_attributes=True)
@@ -165,6 +171,7 @@ class BatchResponse(BaseModel):
     blockchain_batch_id: str
     farmer_id: int
     current_state: str
+    quantity: Optional[float] = None          # canonical: harvest_record.quantity_kg
     create_tx_hash: Optional[str] = None
     harvest_tx_hash: Optional[str] = None
     process_tx_hash: Optional[str] = None
@@ -177,6 +184,7 @@ class BatchResponse(BaseModel):
     lab_verified_at: Optional[datetime] = None
     packaged_at: Optional[datetime] = None
     distributed_at: Optional[datetime] = None
+    authenticity: Optional[BatchAuthenticitySummary] = None
 
 
 class BatchTransitionResponse(BaseModel):
