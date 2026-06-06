@@ -11,7 +11,6 @@ def _row(**overrides) -> SimpleNamespace:
         batch_id=3,
         unit_count=3,
         jar_ids=["J-01", "J-02", "J-03"],
-        qr_codes=["QR-01", "QR-02", "QR-03"],
         notes="500g glass jars",
         packaging_proof_hash=None,
     )

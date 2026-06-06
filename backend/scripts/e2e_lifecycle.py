@@ -243,7 +243,6 @@ def run(base_url: str, invite_code: str) -> int:
         package_resp = _post(client, f"/batches/{batch_id}/package", {
             "unit_count": 3,
             "jar_ids": ["J1", "J2", "J3"],
-            "qr_codes": ["QR1", "QR2", "QR3"],
             "notes": "500g jars",
         }, headers=_auth(packager_token))
         _assert(package_resp["new_state"] == "PACKAGED", f"expected PACKAGED, got {package_resp['new_state']}")

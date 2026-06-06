@@ -144,10 +144,10 @@ class LabPreviewResponse(BaseModel):
 
 
 class PackagingRequest(BaseModel):
-    """Data for recording packaging (S3→S4)."""
+    """Data for recording packaging (S3→S4). One consumer QR per batch is derived
+    from the batch id; jars are still recorded for count/identity."""
     unit_count: int = Field(ge=1)
     jar_ids: list[str] = Field(min_length=1)
-    qr_codes: list[str] = Field(min_length=1)
     notes: Optional[str] = None
 
     @model_validator(mode="after")
@@ -155,10 +155,6 @@ class PackagingRequest(BaseModel):
         if len(self.jar_ids) != self.unit_count:
             raise ValueError(
                 f"jar_ids length ({len(self.jar_ids)}) must equal unit_count ({self.unit_count})"
-            )
-        if len(self.qr_codes) != self.unit_count:
-            raise ValueError(
-                f"qr_codes length ({len(self.qr_codes)}) must equal unit_count ({self.unit_count})"
             )
         return self
 
@@ -357,7 +353,6 @@ class PackagingRecordPublic(BaseModel):
     batch_id: int
     unit_count: int
     jar_ids: list[str]
-    qr_codes: list[str]
     notes: Optional[str] = None
     packaging_proof_hash: Optional[str] = None
     recorded_at: Optional[datetime] = None

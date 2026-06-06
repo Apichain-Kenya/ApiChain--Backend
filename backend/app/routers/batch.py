@@ -643,12 +643,12 @@ def _process_record_canonical_payload(row: ProcessRecord) -> dict:
 
 
 def _packaging_record_canonical_payload(row: PackagingRecord) -> dict:
-    """Pre-image dict for `packagingHash` anchored at S4."""
+    """Sprint 13 pre-image — one QR per batch, so qr_codes is gone. jar_ids stays
+    (records physical jar identity/count); unit_count already equals the jar count."""
     return {
         "batch_id": row.batch_id,
         "unit_count": row.unit_count,
         "jar_ids": list(row.jar_ids) if row.jar_ids else [],
-        "qr_codes": list(row.qr_codes) if row.qr_codes else [],
         "notes": row.notes,
     }
 
@@ -879,7 +879,6 @@ def record_packaging(
         batch_id=batch.id,
         unit_count=data.unit_count,
         jar_ids=data.jar_ids,
-        qr_codes=data.qr_codes,
         notes=data.notes,
     )
     db.add(row)
