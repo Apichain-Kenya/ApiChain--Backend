@@ -9,7 +9,7 @@ from app.models.lab_result import LabResult
 from app.models.environmental_data import EnvironmentalData
 from app.models.apiary import ApiaryLocation
 from app.models.geo_ai import GeoAIPrediction, ValidationResult
-from app.services.geo_ai import predict_and_save, validate_and_save
+from app.services.geo_ai import predict_and_save, validate_and_save, GeoAIModelError
 
 router = APIRouter(prefix="/geo-ai", tags=["Geo-AI"])
 
@@ -19,7 +19,7 @@ def run_prediction(
     batch_id: int,
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles([
-        "on_ground_officer", "admin", "super_admin"
+        "lab_test_officer", "on_ground_officer", "admin", "super_admin"
     ])),
 ):
     batch = db.query(HoneyBatch).filter(
@@ -51,20 +51,23 @@ def run_prediction(
     ).first()
     pollen_density = (lab.pollen_density or 30000) if lab else 30000
 
-    prediction = predict_and_save(
-        db              = db,
-        batch_id        = batch_id,
-        latitude        = apiary.latitude,
-        longitude       = apiary.longitude,
-        altitude        = apiary.altitude or 1000.0,
-        vegetation_type = apiary.vegetation_type or "unknown",
-        harvest_date    = batch.harvested_at or batch.created_at,
-        temperature     = env.temperature or 22.0,
-        humidity        = env.humidity or 65.0,
-        rainfall        = env.rainfall or 80.0,
-        ndvi            = 0.55,
-        pollen_density  = pollen_density,
-    )
+    try:
+        prediction = predict_and_save(
+            db              = db,
+            batch_id        = batch_id,
+            latitude        = apiary.latitude,
+            longitude       = apiary.longitude,
+            altitude        = apiary.altitude or 1000.0,
+            vegetation_type = apiary.vegetation_type or "unknown",
+            harvest_date    = batch.harvested_at or batch.created_at,
+            temperature     = env.temperature or 22.0,
+            humidity        = env.humidity or 65.0,
+            rainfall        = env.rainfall or 80.0,
+            ndvi            = 0.55,
+            pollen_density  = pollen_density,
+        )
+    except GeoAIModelError as e:
+        raise HTTPException(503, f"GeoAI model unavailable: {e}")
 
     return {
         "batch_id":            batch_id,
@@ -83,7 +86,7 @@ def run_validation(
     batch_id: int,
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles([
-        "on_ground_officer", "admin", "super_admin"
+        "lab_test_officer", "on_ground_officer", "admin", "super_admin"
     ])),
 ):
     batch = db.query(HoneyBatch).filter(
@@ -110,14 +113,17 @@ def run_validation(
     if existing:
         raise HTTPException(409, "Validation already exists for this batch")
 
-    validation = validate_and_save(
-        db              = db,
-        batch_id        = batch_id,
-        prediction      = prediction,
-        actual_moisture = lab.moisture_content,
-        actual_sugar    = lab.sucrose_level,
-        actual_hmf      = lab.hmf_level,
-    )
+    try:
+        validation = validate_and_save(
+            db              = db,
+            batch_id        = batch_id,
+            prediction      = prediction,
+            actual_moisture = lab.moisture_content,
+            actual_sugar    = lab.sucrose_level,
+            actual_hmf      = lab.hmf_level,
+        )
+    except GeoAIModelError as e:
+        raise HTTPException(503, f"GeoAI model unavailable: {e}")
 
     return {
         "batch_id":            batch_id,
@@ -148,8 +154,18 @@ def get_result(
     if not prediction:
         raise HTTPException(404, "No prediction found — run /predict first")
 
+    # Include the actual lab metrics so the dashboard's predicted-vs-actual
+    # table has both sides in one call (the /batches list payload omits them).
+    lab = db.query(LabResult).filter(LabResult.batch_id == batch_id).first()
+    lab_actuals = {
+        "moisture_content": lab.moisture_content if lab else None,
+        "sucrose_level":    lab.sucrose_level if lab else None,
+        "hmf_level":        lab.hmf_level if lab else None,
+    }
+
     return {
         "batch_id":   batch_id,
         "prediction": prediction,
         "validation": validation,
+        "lab":        lab_actuals,
     }

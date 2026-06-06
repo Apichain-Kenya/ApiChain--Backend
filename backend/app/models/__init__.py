@@ -12,3 +12,4 @@ from .eth_wallet import EthWallet
 from .user import User
 from .farmer import Farmer
 from .document import Document
+from .geo_ai import GeoAIPrediction, ValidationResult

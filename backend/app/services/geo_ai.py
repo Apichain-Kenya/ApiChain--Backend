@@ -10,32 +10,75 @@ from app.models.geo_ai import GeoAIPrediction, ValidationResult
 
 ML_DIR = Path(__file__).parent.parent / "ml_models"
 
-scaler    = joblib.load(ML_DIR / "scaler.pkl")
-le_region = joblib.load(ML_DIR / "le_region.pkl")
-le_season = joblib.load(ML_DIR / "le_season.pkl")
-le_veg    = joblib.load(ML_DIR / "le_veg.pkl")
+TARGETS = ["moisture_content", "sucrose_level", "hmf_level"]
 
-with open(ML_DIR / "feature_cols.json") as f:
-    FEATURE_COLS = json.load(f)
 
-with open(ML_DIR / "flowering_calendar.pkl", "rb") as f:
-    _cal = pickle.load(f)
+class GeoAIModelError(RuntimeError):
+    """Raised when ML artifacts are missing/incompatible. Routes catch this
+    and return HTTP 503 so a model problem degrades the geo-ai routes only,
+    instead of crashing backend boot (artifacts load lazily, not at import)."""
 
-FLOWERING_CALENDAR = _cal["FLOWERING_CALENDAR"]
-REGION_BOUNDS      = _cal["REGION_BOUNDS"]
-ZONE_CENTROIDS     = _cal["ZONE_CENTROIDS"]
-TOLERANCES         = _cal["TOLERANCES"]
-THRESHOLD          = _cal["THRESHOLD"]
-TARGETS            = ["moisture_content", "sucrose_level", "hmf_level"]
 
-ensemble_models = {t: joblib.load(ML_DIR / f"ensemble_{t}.pkl") for t in TARGETS}
+# Module-level handles, populated lazily by _ensure_loaded() on first use.
+scaler = le_region = le_season = le_veg = None
+FEATURE_COLS = FLOWERING_CALENDAR = REGION_BOUNDS = None
+ZONE_CENTROIDS = TOLERANCES = THRESHOLD = ensemble_models = None
+# Max plausible distance (km) from a coord to its nearest region centroid before
+# we treat the location as outside Kenya's modelled regions. Derived at load
+# time from the regions' own spread (max pairwise centroid distance), so it
+# scales with the data instead of being a magic constant.
+_REGION_DIST_CAP = None
+_LOADED = False
 
-# Startup check — catch mismatches before any request hits
-assert len(FEATURE_COLS) == scaler.n_features_in_, (
-    f"MISMATCH: feature_cols.json has {len(FEATURE_COLS)} cols "
-    f"but scaler expects {scaler.n_features_in_}. "
-    f"FEATURE_COLS: {FEATURE_COLS}"
-)
+
+def _ensure_loaded():
+    """Load ML artifacts once, on first request. Any failure (missing file,
+    pickle/version incompatibility, feature/scaler mismatch) raises
+    GeoAIModelError rather than propagating at import time."""
+    global scaler, le_region, le_season, le_veg, FEATURE_COLS
+    global FLOWERING_CALENDAR, REGION_BOUNDS, ZONE_CENTROIDS, TOLERANCES, THRESHOLD
+    global ensemble_models, _REGION_DIST_CAP, _LOADED
+    if _LOADED:
+        return
+    # SAFETY: these .pkl artifacts are first-party — the teammate's own trained
+    # models, shipped out-of-band and extracted into app/ml_models/ (gitignored),
+    # never user-supplied. joblib/pickle load of trusted local artifacts is the
+    # standard sklearn/xgboost path; no untrusted deserialization happens here.
+    try:
+        scaler    = joblib.load(ML_DIR / "scaler.pkl")
+        le_region = joblib.load(ML_DIR / "le_region.pkl")
+        le_season = joblib.load(ML_DIR / "le_season.pkl")
+        le_veg    = joblib.load(ML_DIR / "le_veg.pkl")
+
+        with open(ML_DIR / "feature_cols.json") as f:
+            FEATURE_COLS = json.load(f)
+
+        with open(ML_DIR / "flowering_calendar.pkl", "rb") as f:
+            _cal = pickle.load(f)
+        FLOWERING_CALENDAR = _cal["FLOWERING_CALENDAR"]
+        REGION_BOUNDS      = _cal["REGION_BOUNDS"]
+        ZONE_CENTROIDS     = _cal["ZONE_CENTROIDS"]
+        TOLERANCES         = _cal["TOLERANCES"]
+        THRESHOLD          = _cal["THRESHOLD"]
+
+        ensemble_models = {t: joblib.load(ML_DIR / f"ensemble_{t}.pkl") for t in TARGETS}
+    except Exception as e:
+        raise GeoAIModelError(f"GeoAI model artifacts failed to load: {e}") from e
+
+    # Catch feature/scaler mismatches before any prediction runs.
+    if len(FEATURE_COLS) != scaler.n_features_in_:
+        raise GeoAIModelError(
+            f"MISMATCH: feature_cols.json has {len(FEATURE_COLS)} cols "
+            f"but scaler expects {scaler.n_features_in_}. FEATURE_COLS: {FEATURE_COLS}"
+        )
+
+    # Distance cap for region snapping = the regions' own max pairwise spread.
+    _cents = list(ZONE_CENTROIDS.values())
+    _REGION_DIST_CAP = max(
+        _haversine(a[0], a[1], b[0], b[1]) for a in _cents for b in _cents
+    )
+
+    _LOADED = True
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -46,11 +89,29 @@ def _haversine(lat1, lon1, lat2, lon2):
     a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
     return R * 2 * atan2(sqrt(a), sqrt(1-a))
 
+def _nearest_region(lat, lon):
+    """Closest region centroid to a coordinate -> (region, distance_km)."""
+    best, best_d = None, None
+    for region, (clat, clon) in ZONE_CENTROIDS.items():
+        d = _haversine(lat, lon, clat, clon)
+        if best_d is None or d < best_d:
+            best, best_d = region, d
+    return best, best_d
+
+
 def _get_region(lat, lon):
+    # Exact bounding-box hit first.
     for region, (mn, mx, mnl, mxl) in REGION_BOUNDS.items():
         if mn <= lat <= mx and mnl <= lon <= mxl:
             return region
-    return "unknown"
+    # The bounding boxes do NOT tile Kenya — real apiaries (e.g. the eastern /
+    # Ukambani belt) land in gaps between them and would otherwise be "unknown",
+    # which collapses triangulation and mis-flags legitimate honey. Snap to the
+    # nearest region centroid, unless the point is implausibly far from every
+    # modelled region (> the regions' own spread) — then it really is off-grid
+    # and "unknown" is the correct suspicion signal.
+    region, dist = _nearest_region(lat, lon)
+    return region if dist <= _REGION_DIST_CAP else "unknown"
 
 def _get_flowering(lat, lon, month):
     region = _get_region(lat, lon)
@@ -96,9 +157,21 @@ def predict_and_save(
     ndvi: float, pollen_density: float,
 ) -> GeoAIPrediction:
 
+    _ensure_loaded()
+
     month  = harvest_date.month
     season = "dry" if month in [1, 2, 6, 7, 8] else "rainy"
     region = _get_region(latitude, longitude)
+
+    # The trained encoders' vegetation vocabulary IS the 5 region labels
+    # (le_veg.classes_ == the regions), so a free-text apiary vegetation_type
+    # like "shrubland" is out-of-distribution -> encoder fallback 0 and a bogus
+    # (0,0) zone centroid. Coordinates are the only in-vocab source, so we feed
+    # the coord-derived region as the vegetation input. NOTE: this assumes the
+    # model was trained with vegetation_type == region; confirm against the
+    # teammate's training setup. See reference_geoai_model_contract (auto-memory).
+    vegetation_type = region
+
     tri    = _triangulation(latitude, longitude, month, vegetation_type, pollen_density)
 
     # Compute sugar_boost from flowering calendar (generated, not from lab)
@@ -178,16 +251,25 @@ def validate_and_save(
     actual_hmf: float,
 ) -> ValidationResult:
 
+    _ensure_loaded()
+
+    # Our lab form makes the 5 metrics optional, so any actual_* can be None.
+    # Skip absent metrics rather than treating them as deviation-from-0 (which
+    # would unfairly tank the score). If ALL three are absent there is no
+    # physical evidence to compare, so phys_match falls back to a neutral 0.5
+    # and the authenticity score leans on triangulation + confidence instead.
     ps = []
     for actual, pred_val, tol_key in [
         (actual_moisture, prediction.predicted_moisture, "moisture_content"),
         (actual_sugar,    prediction.predicted_sugar,    "sucrose_level"),
         (actual_hmf,      prediction.predicted_hmf,      "hmf_level"),
     ]:
+        if actual is None:
+            continue
         dev = abs(actual - (pred_val or 0))
         ps.append(max(0.0, 1.0 - dev / (2 * TOLERANCES[tol_key])))
 
-    mean_phys  = float(np.mean(ps))
+    mean_phys  = float(np.mean(ps)) if ps else 0.5
     tri_score  = prediction.triangulation_score or 0.5
     conf       = prediction.confidence_score or 0.5
     auth_score = round(float(np.clip(

@@ -359,6 +359,15 @@ class TxHashes(BaseModel):
     distribute_tx: Optional[str] = None
 
 
+class AuthenticityPublic(BaseModel):
+    """Consumer-facing GeoAI authenticity summary on /verify. Joined from
+    validation_results by batch.id. Chain-neutral (no hashed field)."""
+    available: bool
+    status: Optional[str] = None   # "verified" | "suspicious" | "flagged"
+    score: Optional[float] = None  # authenticity_score (0..1)
+    model_config = ConfigDict(from_attributes=True)
+
+
 class BatchVerifyResponse(BaseModel):
     """Public verification response (for QR scan)."""
     batch_id: str
@@ -377,6 +386,7 @@ class BatchVerifyResponse(BaseModel):
     environmental_data: Optional[EnvironmentalDataPublic] = None
     verification: Optional[VerificationBlock] = None
     tx_hashes: Optional[TxHashes] = None
+    authenticity: Optional[AuthenticityPublic] = None
 
 
 class SimpleBatchCreateRequest(BaseModel):

@@ -44,6 +44,7 @@ def fetch_environment_data(
         "farmer",
         "on_ground_officer",
         "harvest_processor",
+        "lab_test_officer",
         "admin",
         "super_admin",
     ])),
