@@ -182,6 +182,31 @@ def _pending_response(batch_id: str, tx_hash: str, stage: str) -> JSONResponse:
     )
 
 
+def _ensure_environmental_data(db: Session, batch) -> "EnvironmentalData | None":
+    """Guarantee an environmental_data row exists for a batch, fetching+persisting
+    a snapshot from the batch's apiary coords if missing. Idempotent: returns the
+    existing row when present (so preview and submit reuse the SAME snapshot →
+    identical predicted values → anchored == reviewed). Staged (flush, not commit);
+    the caller's commit/rollback owns durability. Returns None if no apiary coords."""
+    existing = db.query(EnvironmentalData).filter(
+        EnvironmentalData.batch_id == batch.id
+    ).first()
+    if existing is not None:
+        return existing
+    if batch.apiary_id is None:
+        return None
+    apiary = db.query(ApiaryLocation).filter(
+        ApiaryLocation.id == batch.apiary_id
+    ).first()
+    if apiary is None:
+        return None
+    snap = fetch_environment_snapshot(apiary.latitude, apiary.longitude)
+    env = EnvironmentalData(batch_id=batch.id, **snap)
+    db.add(env)
+    db.flush()
+    return env
+
+
 # ------------------------------------------------------------------
 # Create batch (S0)
 # ------------------------------------------------------------------
