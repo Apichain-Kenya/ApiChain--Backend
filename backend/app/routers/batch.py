@@ -14,7 +14,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from web3.exceptions import ContractLogicError
+from web3.exceptions import ContractLogicError, BadFunctionCallOutput
 
 from app.database import get_db
 from app.deps import get_current_user, require_roles
@@ -1090,7 +1090,7 @@ def get_batch_timeline(batch_id: str):
 
     try:
         timeline = blockchain_service.get_batch_timeline(batch_id_bytes)
-    except ContractLogicError as e:
+    except (ContractLogicError, BadFunctionCallOutput) as e:
         raise HTTPException(status_code=404, detail=f"Batch not found on chain: {e}")
 
     return BatchTimelineResponse(batch_id=batch_id, **timeline)
@@ -1105,7 +1105,7 @@ def get_batch_hashes(batch_id: str):
 
     try:
         hashes = blockchain_service.get_batch_hashes(batch_id_bytes)
-    except ContractLogicError as e:
+    except (ContractLogicError, BadFunctionCallOutput) as e:
         raise HTTPException(status_code=404, detail=f"Batch not found on chain: {e}")
 
     return BatchHashesResponse(batch_id=batch_id, **hashes)
@@ -1131,8 +1131,15 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
         batch_data = blockchain_service.get_batch(batch_id_bytes)
         timeline = blockchain_service.get_batch_timeline(batch_id_bytes)
         hashes = blockchain_service.get_batch_hashes(batch_id_bytes)
-    except ContractLogicError as e:
-        raise HTTPException(status_code=404, detail=f"Batch not found on chain: {e}")
+    except (ContractLogicError, BadFunctionCallOutput) as e:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Batch not found on chain. The batch may not exist, or the "
+                "blockchain node is not synced / the contract is not deployed "
+                "at the configured address (Hardhat/DB desync)."
+            ),
+        )
 
     batch = db.query(HoneyBatch).filter(
         HoneyBatch.blockchain_batch_id == batch_id
