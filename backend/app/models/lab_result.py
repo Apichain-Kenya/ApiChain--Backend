@@ -5,7 +5,6 @@ from sqlalchemy import (
     String,
     DateTime,
     ForeignKey,
-    Boolean,
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
@@ -33,9 +32,13 @@ class LabResult(Base):
 
     pollen_density = Column(Float, nullable=True)
 
-    purity_score = Column(Float, nullable=True)
-
-    passed_quality_check = Column(Boolean, default=False)
+    # Sprint 13: GeoAI authenticity, anchored inside the lab proof pre-image.
+    predicted_moisture = Column(Float, nullable=True)
+    predicted_sugar = Column(Float, nullable=True)
+    predicted_hmf = Column(Float, nullable=True)
+    authenticity_score = Column(Float, nullable=True)
+    validation_status = Column(String, nullable=True)   # verified|suspicious|flagged
+    explanation = Column(String, nullable=True)
 
     laboratory_name = Column(String, nullable=True)
 

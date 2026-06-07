@@ -162,8 +162,8 @@ def run(base_url: str, invite_code: str) -> int:
         # 5b. Seed an apiary owned by the farmer (Sprint 6: POST /batches/
         # now requires apiary_id pointing at a real apiary_locations row).
         apiary_resp = _post(client, "/apiary-locations/", {
-            "latitude": 0.5,
-            "longitude": 36.0,
+            "latitude": -0.5,
+            "longitude": 37.0,
             "altitude": 1795.0,
             "vegetation_type": "acacia woodland",
             "hive_count": 18,
@@ -223,12 +223,12 @@ def run(base_url: str, invite_code: str) -> int:
             "password": employee_credentials["lab_test_officer"]["password"],
         })["access_token"]
         lab_resp = _post(client, f"/batches/{batch_id}/lab-verify", {
-            "moisture_content": 18.2,
-            "hmf_level": 12.0,
-            "purity_score": 95.5,
-            "passed_quality_check": True,
+            "moisture_content": 19.0,
+            "sucrose_level": 4.0,
+            "hmf_level": 28.0,
+            "pollen_density": 30000,
             "laboratory_name": "KEBS Lab #1",
-            "analyst_name": "Sprint3 E2E",
+            "analyst_name": "Sprint13 E2E",
             "certificate_number": "abcd1234",
         }, headers=_auth(lab_token))
         _assert(lab_resp["new_state"] == "LAB_VERIFIED", f"expected LAB_VERIFIED, got {lab_resp['new_state']}")
@@ -243,7 +243,6 @@ def run(base_url: str, invite_code: str) -> int:
         package_resp = _post(client, f"/batches/{batch_id}/package", {
             "unit_count": 3,
             "jar_ids": ["J1", "J2", "J3"],
-            "qr_codes": ["QR1", "QR2", "QR3"],
             "notes": "500g jars",
         }, headers=_auth(packager_token))
         _assert(package_resp["new_state"] == "PACKAGED", f"expected PACKAGED, got {package_resp['new_state']}")

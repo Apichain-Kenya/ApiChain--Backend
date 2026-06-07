@@ -147,9 +147,9 @@ def test_full_lifecycle_walks_s0_to_s5(backend_base_url, invite_code):
     )
     r = client.post(f"/batches/{batch_id}/lab-verify", json={
         "moisture_content": 18.2,
+        "sucrose_level": 4.0,
         "hmf_level": 12.0,
-        "purity_score": 95.5,
-        "passed_quality_check": True,
+        "pollen_density": 30000,
         "laboratory_name": "KEBS Lab #1",
     }, headers=_auth(lab_token))
     assert r.status_code == 200, r.text
@@ -162,7 +162,6 @@ def test_full_lifecycle_walks_s0_to_s5(backend_base_url, invite_code):
     r = client.post(f"/batches/{batch_id}/package", json={
         "unit_count": 3,
         "jar_ids": ["J1", "J2", "J3"],
-        "qr_codes": ["QR1", "QR2", "QR3"],
     }, headers=_auth(packager_token))
     assert r.status_code == 200, r.text
     assert r.json()["new_state"] == "PACKAGED"

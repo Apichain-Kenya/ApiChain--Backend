@@ -109,30 +109,45 @@ class ProcessingRequest(BaseModel):
 
 
 class LabVerifyRequest(BaseModel):
-    """Data for anchoring lab proof (S2→S3). Oracle-signed.
-
-    Fields mirror the `lab_results` table columns so the persisted row is the
-    canonical pre-image of the on-chain proof hash. See `app/models/lab_result.py`.
-    """
+    """Tester-entered actual metrics (S2→S3). Authenticity (predicted_*, score,
+    validation_status, explanation) is computed server-side and is NOT accepted
+    from the client — the server never trusts a client-passed score."""
     moisture_content: Optional[float] = Field(default=None, ge=0, le=100)
     sucrose_level: Optional[float] = Field(default=None, ge=0)
     hmf_level: Optional[float] = Field(default=None, ge=0)
     pollen_density: Optional[float] = Field(default=None, ge=0)
-    purity_score: Optional[float] = Field(default=None, ge=0, le=100)
-
-    passed_quality_check: bool
-
     laboratory_name: Optional[str] = None
     analyst_name: Optional[str] = None
     certificate_number: Optional[str] = None
     notes: Optional[str] = None
 
 
+class LabPreviewRequest(BaseModel):
+    """Actual metrics the tester entered, for a non-persisting authenticity preview."""
+    moisture_content: Optional[float] = Field(default=None, ge=0, le=100)
+    sucrose_level: Optional[float] = Field(default=None, ge=0)
+    hmf_level: Optional[float] = Field(default=None, ge=0)
+    pollen_density: Optional[float] = Field(default=None, ge=0)
+
+
+class LabPreviewResponse(BaseModel):
+    predicted_moisture: Optional[float] = None
+    predicted_sugar: Optional[float] = None
+    predicted_hmf: Optional[float] = None
+    authenticity_score: Optional[float] = None
+    validation_status: Optional[str] = None
+    explanation: Optional[str] = None
+    region_detected: Optional[str] = None
+    triangulation_score: Optional[float] = None
+    confidence_score: Optional[float] = None
+    phys_match_score: Optional[float] = None
+
+
 class PackagingRequest(BaseModel):
-    """Data for recording packaging (S3→S4)."""
+    """Data for recording packaging (S3→S4). One consumer QR per batch is derived
+    from the batch id; jars are still recorded for count/identity."""
     unit_count: int = Field(ge=1)
     jar_ids: list[str] = Field(min_length=1)
-    qr_codes: list[str] = Field(min_length=1)
     notes: Optional[str] = None
 
     @model_validator(mode="after")
@@ -140,10 +155,6 @@ class PackagingRequest(BaseModel):
         if len(self.jar_ids) != self.unit_count:
             raise ValueError(
                 f"jar_ids length ({len(self.jar_ids)}) must equal unit_count ({self.unit_count})"
-            )
-        if len(self.qr_codes) != self.unit_count:
-            raise ValueError(
-                f"qr_codes length ({len(self.qr_codes)}) must equal unit_count ({self.unit_count})"
             )
         return self
 
@@ -157,6 +168,12 @@ class DistributionRequest(BaseModel):
 
 # -- Response schemas -------------------------------------------------------
 
+class BatchAuthenticitySummary(BaseModel):
+    available: bool
+    status: Optional[str] = None
+    score: Optional[float] = None
+
+
 class BatchResponse(BaseModel):
     """Full batch data returned by API."""
     model_config = ConfigDict(from_attributes=True)
@@ -165,6 +182,7 @@ class BatchResponse(BaseModel):
     blockchain_batch_id: str
     farmer_id: int
     current_state: str
+    quantity: Optional[float] = None          # canonical: harvest_record.quantity_kg
     create_tx_hash: Optional[str] = None
     harvest_tx_hash: Optional[str] = None
     process_tx_hash: Optional[str] = None
@@ -177,6 +195,7 @@ class BatchResponse(BaseModel):
     lab_verified_at: Optional[datetime] = None
     packaged_at: Optional[datetime] = None
     distributed_at: Optional[datetime] = None
+    authenticity: Optional[BatchAuthenticitySummary] = None
 
 
 class BatchTransitionResponse(BaseModel):
@@ -212,14 +231,17 @@ class BatchHashesResponse(BaseModel):
 class LabResultPublic(BaseModel):
     """Persisted lab_results row exposed by the public verify endpoint."""
     model_config = ConfigDict(from_attributes=True)
-
     batch_id: int
     moisture_content: Optional[float] = None
     sucrose_level: Optional[float] = None
     hmf_level: Optional[float] = None
     pollen_density: Optional[float] = None
-    purity_score: Optional[float] = None
-    passed_quality_check: bool
+    predicted_moisture: Optional[float] = None
+    predicted_sugar: Optional[float] = None
+    predicted_hmf: Optional[float] = None
+    authenticity_score: Optional[float] = None
+    validation_status: Optional[str] = None
+    explanation: Optional[str] = None
     laboratory_name: Optional[str] = None
     analyst_name: Optional[str] = None
     certificate_number: Optional[str] = None
@@ -331,7 +353,6 @@ class PackagingRecordPublic(BaseModel):
     batch_id: int
     unit_count: int
     jar_ids: list[str]
-    qr_codes: list[str]
     notes: Optional[str] = None
     packaging_proof_hash: Optional[str] = None
     recorded_at: Optional[datetime] = None
@@ -361,11 +382,21 @@ class TxHashes(BaseModel):
 
 class AuthenticityPublic(BaseModel):
     """Consumer-facing GeoAI authenticity summary on /verify. Joined from
-    validation_results by batch.id. Chain-neutral (no hashed field)."""
+    validation_results / lab_results. Chain-neutral (no hashed field)."""
     available: bool
-    status: Optional[str] = None   # "verified" | "suspicious" | "flagged"
-    score: Optional[float] = None  # authenticity_score (0..1)
+    status: Optional[str] = None     # raw: verified|suspicious|flagged (dashboards)
+    score: Optional[float] = None    # raw 0..1 (dashboards; consumer never shows)
+    band: Optional[str] = None       # consumer-safe: consistent|under_review
+    explanation: Optional[str] = None  # anchored English proof statement
     model_config = ConfigDict(from_attributes=True)
+
+
+class ConsumerView(BaseModel):
+    """Consumer scan-page block. NEVER exposes the raw score or the word 'flagged'."""
+    place: Optional[str] = None
+    producer_label: str = "a verified ApiChain beekeeper"
+    authenticity_band: Optional[str] = None      # consistent|under_review
+    authenticity_explanation: Optional[str] = None
 
 
 class BatchVerifyResponse(BaseModel):
@@ -387,6 +418,7 @@ class BatchVerifyResponse(BaseModel):
     verification: Optional[VerificationBlock] = None
     tx_hashes: Optional[TxHashes] = None
     authenticity: Optional[AuthenticityPublic] = None
+    consumer: Optional[ConsumerView] = None
 
 
 class SimpleBatchCreateRequest(BaseModel):

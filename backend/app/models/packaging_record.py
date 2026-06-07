@@ -28,7 +28,6 @@ class PackagingRecord(Base):
 
     unit_count = Column(Integer, nullable=False)
     jar_ids = Column(JSON, nullable=False)
-    qr_codes = Column(JSON, nullable=False)
     notes = Column(String, nullable=True)
 
     recorded_at = Column(

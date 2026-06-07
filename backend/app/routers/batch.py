@@ -7,13 +7,14 @@ and on-chain by the smart contract's role checks.
 """
 
 import logging
+import math
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from web3.exceptions import ContractLogicError
+from web3.exceptions import ContractLogicError, BadFunctionCallOutput
 
 from app.database import get_db
 from app.deps import get_current_user, require_roles
@@ -38,6 +39,7 @@ from app.schemas.batch import (
     BatchHashesResponse,
     BatchTimelineResponse,
     BatchVerifyResponse,
+    ConsumerView,
     DistributionRecordPublic,
     DistributionRequest,
     EnvironmentalDataPublic,
@@ -58,6 +60,10 @@ from app.models.eth_wallet import EthWallet
 from app.services.blockchain import blockchain_service, ReceiptPendingError
 from app.services.encryption import decrypt_private_key
 from app.services.environment import fetch_environment_snapshot
+from app.services.geo_ai import (
+    compute_prediction, compute_validation, build_explanation, GeoAIModelError,
+)
+from app.models.geo_ai import GeoAIPrediction, ValidationResult
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +128,27 @@ def _check_blockchain():
         )
 
 
+def _authenticity_band(status: str | None) -> str | None:
+    """Map the raw validation status to a consumer-safe band. Consumers must
+    never see the raw score or the word 'flagged'. verified -> consistent;
+    suspicious/flagged -> under_review; unknown/None -> None."""
+    if status == "verified":
+        return "consistent"
+    if status in ("suspicious", "flagged"):
+        return "under_review"
+    return None
+
+
+def _consumer_explanation(status: str | None, explanation: str | None) -> str | None:
+    """Consumer-safe explanation. The anchored proof statement ends with
+    'Verdict: {status}.', so for non-verified batches it contains the raw words
+    'suspicious'/'flagged' which consumers must not see. Only surface the prose
+    when the batch is verified; otherwise return None (the FE shows just the
+    neutral 'under review' band). Staff dashboards still get the full text via
+    AuthenticityPublic.explanation."""
+    return explanation if status == "verified" else None
+
+
 def _batch_id_to_bytes(batch_id: str) -> bytes:
     """Decode a batch_id hex string (with or without 0x prefix) into 32-byte form."""
     hex_part = batch_id[2:] if batch_id.startswith("0x") else batch_id
@@ -179,6 +206,31 @@ def _pending_response(batch_id: str, tx_hash: str, stage: str) -> JSONResponse:
             ),
         },
     )
+
+
+def _ensure_environmental_data(db: Session, batch) -> "EnvironmentalData | None":
+    """Guarantee an environmental_data row exists for a batch, fetching+persisting
+    a snapshot from the batch's apiary coords if missing. Idempotent: returns the
+    existing row when present (so preview and submit reuse the SAME snapshot →
+    identical predicted values → anchored == reviewed). Staged (flush, not commit);
+    the caller's commit/rollback owns durability. Returns None if no apiary coords."""
+    existing = db.query(EnvironmentalData).filter(
+        EnvironmentalData.batch_id == batch.id
+    ).first()
+    if existing is not None:
+        return existing
+    if batch.apiary_id is None:
+        return None
+    apiary = db.query(ApiaryLocation).filter(
+        ApiaryLocation.id == batch.apiary_id
+    ).first()
+    if apiary is None:
+        return None
+    snap = fetch_environment_snapshot(apiary.latitude, apiary.longitude)
+    env = EnvironmentalData(batch_id=batch.id, **snap)
+    db.add(env)
+    db.flush()
+    return env
 
 
 # ------------------------------------------------------------------
@@ -454,22 +506,22 @@ def record_processing(
 # ------------------------------------------------------------------
 
 def _lab_result_canonical_payload(row: LabResult) -> dict:
-    """Build the deterministic pre-image dict used for `proofHash`.
-
-    The persisted row is the single source of truth — re-running this on the
-    DB row at QR-verification time must reproduce the exact bytes that were
-    hashed at lab-verify time. Only stable, oracle-anchored columns are
-    included; `id`, `tested_at`, and `lab_proof_hash` are excluded (the first
-    two are DB-assigned post-hash; the third IS the hash).
-    """
+    """Sprint 13 pre-image. Drops purity_score + passed_quality_check; adds the
+    anchored GeoAI authenticity fields. Existing measured metrics stay native
+    float (proven on Sepolia); the new ML floats route through _q4 (type-stable).
+    `explanation` + `validation_status` are stored strings — round-trip identical."""
     return {
         "batch_id": row.batch_id,
         "moisture_content": row.moisture_content,
         "sucrose_level": row.sucrose_level,
         "hmf_level": row.hmf_level,
         "pollen_density": row.pollen_density,
-        "purity_score": row.purity_score,
-        "passed_quality_check": row.passed_quality_check,
+        "predicted_moisture": _q4(row.predicted_moisture),
+        "predicted_sugar": _q4(row.predicted_sugar),
+        "predicted_hmf": _q4(row.predicted_hmf),
+        "authenticity_score": _q4(row.authenticity_score),
+        "validation_status": row.validation_status,
+        "explanation": row.explanation,
         "laboratory_name": row.laboratory_name,
         "analyst_name": row.analyst_name,
         "certificate_number": row.certificate_number,
@@ -490,6 +542,56 @@ def _canonical_dt(dt) -> str | None:
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt.isoformat()
+
+
+def _q4(x) -> str | None:
+    """Render an ML-derived numeric as a fixed-precision (4dp) string so the
+    canonical hash is independent of float-vs-Decimal column typing. Mirrors the
+    expected_yield_kg quantize pattern in _metadata_record_canonical_payload."""
+    if x is None:
+        return None
+    return str(Decimal(str(x)).quantize(Decimal("0.0001")))
+
+
+def _reject_non_finite(named_values: dict) -> None:
+    """Refuse to anchor non-finite ML output. A nan serializes to the string 'NaN'
+    (silently anchoring garbage as 'verified'); an inf crashes _q4's Decimal.quantize.
+    Either way it must not reach the chain."""
+    for name, v in named_values.items():
+        if v is not None and (math.isnan(v) or math.isinf(v)):
+            raise HTTPException(
+                status_code=503,
+                detail=f"GeoAI returned a non-finite {name}; refusing to anchor.",
+            )
+
+
+def _compute_authenticity(batch, apiary, env, moisture_content, hmf_level, sucrose_level):
+    """Server-authoritative GeoAI compute shared by the lab PREVIEW and the
+    lab-verify ANCHOR, so the previewed score is EXACTLY what gets anchored — a
+    single source of truth for the inputs/defaults removes preview-vs-submit drift.
+    Pure compute (no DB write). Raises HTTPException(503) on model error or
+    non-finite output. Returns (pred, val, explanation)."""
+    try:
+        pred = compute_prediction(
+            latitude=apiary.latitude, longitude=apiary.longitude,
+            altitude=apiary.altitude or 1000.0,
+            vegetation_type=apiary.vegetation_type or "unknown",
+            harvest_date=batch.harvested_at or batch.created_at,
+            temperature=env.temperature or 22.0, humidity=env.humidity or 65.0,
+            rainfall=env.rainfall or 80.0, ndvi=0.55,
+        )
+        val = compute_validation(pred, actual_moisture=moisture_content,
+                                 actual_hmf=hmf_level, actual_sugar=sucrose_level)
+    except GeoAIModelError as e:
+        raise HTTPException(status_code=503, detail=f"GeoAI model unavailable: {e}")
+    explanation = build_explanation(pred, val, moisture_content, hmf_level)
+    _reject_non_finite({
+        "predicted_moisture": pred["predicted_moisture"],
+        "predicted_sugar": pred["predicted_sugar"],
+        "predicted_hmf": pred["predicted_hmf"],
+        "authenticity_score": val["authenticity_score"],
+    })
+    return pred, val, explanation
 
 
 def _apiary_record_canonical_payload(row: ApiaryRecord) -> dict:
@@ -563,12 +665,12 @@ def _process_record_canonical_payload(row: ProcessRecord) -> dict:
 
 
 def _packaging_record_canonical_payload(row: PackagingRecord) -> dict:
-    """Pre-image dict for `packagingHash` anchored at S4."""
+    """Sprint 13 pre-image — one QR per batch, so qr_codes is gone. jar_ids stays
+    (records physical jar identity/count); unit_count already equals the jar count."""
     return {
         "batch_id": row.batch_id,
         "unit_count": row.unit_count,
         "jar_ids": list(row.jar_ids) if row.jar_ids else [],
-        "qr_codes": list(row.qr_codes) if row.qr_codes else [],
         "notes": row.notes,
     }
 
@@ -669,16 +771,13 @@ def anchor_lab_proof(
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_roles(["lab_test_officer", "admin", "super_admin"])),
 ):
-    """Anchor lab verification proof (S2→S3).
+    """Anchor lab verification proof (S2→S3) with server-computed GeoAI authenticity.
 
-    Signs with the system oracle key, deliberately bypassing
-    `_get_user_signing_key()` — ORACLE_ROLE is one trusted EOA, not a user
-    identity. See `blockchain_service.anchor_lab_proof` for details.
-
-    Flow: validate state → INSERT lab_results row (flushed but uncommitted) →
-    hash the persisted row → anchor on chain → store hash on row + tx on
-    batch → commit. If the chain call fails, the inserted row is rolled back
-    so no unanchored lab result is persisted.
+    Sprint 13: the server AUTHORITATIVELY recomputes the GeoAI prediction + score +
+    explanation from the batch's apiary/env (never trusts a client-passed score),
+    persists them into lab_results (the anchored row) AND into geo_ai_predictions /
+    validation_results (sole writer), then hashes the new canonical pre-image and
+    anchors it via the system oracle key. Rollback on chain failure; 202 on pending.
     """
     _check_blockchain()
 
@@ -694,10 +793,50 @@ def anchor_lab_proof(
     if existing:
         raise HTTPException(status_code=409, detail="Lab result already exists for this batch")
 
-    # Insert + flush so DB-assigned columns (id, tested_at) are populated, but
-    # do NOT commit until the chain anchor succeeds.
-    row = LabResult(batch_id=batch.id, **data.model_dump())
+    if db.query(GeoAIPrediction).filter(GeoAIPrediction.batch_id == batch.id).first():
+        raise HTTPException(status_code=409, detail="GeoAI prediction already exists for this batch")
+
+    # Ensure env (idempotent — preview already persisted it; reuse the SAME snapshot
+    # so the anchored prediction == what the tester previewed).
+    env = _ensure_environmental_data(db, batch)
+    if env is None:
+        raise HTTPException(status_code=400, detail="Environmental data unavailable (no apiary coords)")
+    apiary = db.query(ApiaryLocation).filter(ApiaryLocation.id == batch.apiary_id).first()
+    if apiary is None:
+        raise HTTPException(status_code=400, detail="Apiary not recorded for this batch")
+
+    # Server authoritatively recomputes (deterministic → matches preview); never
+    # trusts a client-passed score.
+    pred, val, explanation = _compute_authenticity(
+        batch, apiary, env, data.moisture_content, data.hmf_level, data.sucrose_level
+    )
+
+    # Persist lab_results WITH authenticity (the anchored row).
+    row = LabResult(
+        batch_id=batch.id,
+        moisture_content=data.moisture_content, sucrose_level=data.sucrose_level,
+        hmf_level=data.hmf_level, pollen_density=data.pollen_density,
+        predicted_moisture=pred["predicted_moisture"], predicted_sugar=pred["predicted_sugar"],
+        predicted_hmf=pred["predicted_hmf"], authenticity_score=val["authenticity_score"],
+        validation_status=val["validation_status"], explanation=explanation,
+        laboratory_name=data.laboratory_name, analyst_name=data.analyst_name,
+        certificate_number=data.certificate_number, notes=data.notes,
+    )
     db.add(row)
+    db.flush()
+
+    # Sole writer of the geo rows (so /verify authenticity + /geo-ai/result keep
+    # working). Staged in the SAME tx → chain failure rolls these back too.
+    geo_pred = GeoAIPrediction(batch_id=batch.id, **{
+        k: pred[k] for k in ("predicted_moisture","predicted_sugar","predicted_hmf",
+                             "confidence_score","region_detected","flowering_species",
+                             "triangulation_score","flora_match_score","dist_to_zone_km",
+                             "n_flowering_species")})
+    db.add(geo_pred)
+    db.flush()
+    db.add(ValidationResult(batch_id=batch.id, prediction_id=geo_pred.id, **{
+        k: val[k] for k in ("authenticity_score","is_valid","validation_status",
+                            "phys_match_score","triangulation_score","confidence_score")}))
     db.flush()
 
     proof_payload = _lab_result_canonical_payload(row)
@@ -729,7 +868,7 @@ def anchor_lab_proof(
         batch_id=batch_id,
         tx_hash=tx_hash,
         new_state="LAB_VERIFIED",
-        message="Lab proof anchored on-chain by oracle",
+        message="Lab proof anchored on-chain by oracle (authenticity recomputed server-side)",
     )
 
 
@@ -762,7 +901,6 @@ def record_packaging(
         batch_id=batch.id,
         unit_count=data.unit_count,
         jar_ids=data.jar_ids,
-        qr_codes=data.qr_codes,
         notes=data.notes,
     )
     db.add(row)
@@ -876,6 +1014,43 @@ def record_distribution(
 # Read endpoints
 # ------------------------------------------------------------------
 
+def build_batch_view(batch) -> dict:
+    """Canonical batch shape the FE can trust. Sources `quantity` from the
+    harvest_record (the two-step create path never set batch.quantity, which is
+    the root of the FE quantity=0 bug), and joins the GeoAI authenticity summary
+    from the validation_results backref. Pure over attributes — unit-testable."""
+    harvest = getattr(batch, "harvest_record", None)
+    if harvest is not None and harvest.quantity_kg is not None:
+        quantity = harvest.quantity_kg
+    else:
+        quantity = batch.quantity
+    val = getattr(batch, "validation", None)
+    return {
+        "id": batch.id,
+        "blockchain_batch_id": batch.blockchain_batch_id,
+        "farmer_id": batch.farmer_id,
+        "current_state": batch.current_state,
+        "quantity": quantity,
+        "create_tx_hash": batch.create_tx_hash,
+        "harvest_tx_hash": batch.harvest_tx_hash,
+        "process_tx_hash": batch.process_tx_hash,
+        "lab_verify_tx_hash": batch.lab_verify_tx_hash,
+        "packaging_tx_hash": batch.packaging_tx_hash,
+        "distribution_tx_hash": batch.distribution_tx_hash,
+        "created_at": batch.created_at,
+        "harvested_at": batch.harvested_at,
+        "processed_at": batch.processed_at,
+        "lab_verified_at": batch.lab_verified_at,
+        "packaged_at": batch.packaged_at,
+        "distributed_at": batch.distributed_at,
+        "authenticity": {
+            "available": val is not None,
+            "status": val.validation_status if val else None,
+            "score": val.authenticity_score if val else None,
+        },
+    }
+
+
 @router.get("/", response_model=list[BatchResponse])
 def list_batches(
     skip: int = 0,
@@ -883,15 +1058,12 @@ def list_batches(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """List batches from the database (paginated)."""
+    """List batches (paginated) in the canonical view-model shape."""
     batches = (
-        db.query(HoneyBatch)
-        .order_by(HoneyBatch.id.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
+        db.query(HoneyBatch).order_by(HoneyBatch.id.desc())
+        .offset(skip).limit(limit).all()
     )
-    return batches
+    return [build_batch_view(b) for b in batches]
 
 
 @router.get("/{batch_id}", response_model=BatchResponse)
@@ -900,13 +1072,13 @@ def get_batch(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get batch details from the database."""
+    """Get batch detail in the canonical view-model shape."""
     batch = db.query(HoneyBatch).filter(
         HoneyBatch.blockchain_batch_id == batch_id
     ).first()
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
-    return batch
+    return build_batch_view(batch)
 
 
 @router.get("/{batch_id}/timeline", response_model=BatchTimelineResponse)
@@ -918,7 +1090,7 @@ def get_batch_timeline(batch_id: str):
 
     try:
         timeline = blockchain_service.get_batch_timeline(batch_id_bytes)
-    except ContractLogicError as e:
+    except (ContractLogicError, BadFunctionCallOutput) as e:
         raise HTTPException(status_code=404, detail=f"Batch not found on chain: {e}")
 
     return BatchTimelineResponse(batch_id=batch_id, **timeline)
@@ -933,7 +1105,7 @@ def get_batch_hashes(batch_id: str):
 
     try:
         hashes = blockchain_service.get_batch_hashes(batch_id_bytes)
-    except ContractLogicError as e:
+    except (ContractLogicError, BadFunctionCallOutput) as e:
         raise HTTPException(status_code=404, detail=f"Batch not found on chain: {e}")
 
     return BatchHashesResponse(batch_id=batch_id, **hashes)
@@ -959,8 +1131,15 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
         batch_data = blockchain_service.get_batch(batch_id_bytes)
         timeline = blockchain_service.get_batch_timeline(batch_id_bytes)
         hashes = blockchain_service.get_batch_hashes(batch_id_bytes)
-    except ContractLogicError as e:
-        raise HTTPException(status_code=404, detail=f"Batch not found on chain: {e}")
+    except (ContractLogicError, BadFunctionCallOutput) as e:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Batch not found on chain. The batch may not exist, or the "
+                "blockchain node is not synced / the contract is not deployed "
+                "at the configured address (Hardhat/DB desync)."
+            ),
+        )
 
     batch = db.query(HoneyBatch).filter(
         HoneyBatch.blockchain_batch_id == batch_id
@@ -977,6 +1156,7 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
     verification: VerificationBlock | None = None
     tx_hashes: TxHashes | None = None
     authenticity: AuthenticityPublic | None = None
+    consumer: ConsumerView | None = None
 
     if batch is not None:
         tx_hashes = TxHashes(
@@ -990,16 +1170,43 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
 
         # GeoAI authenticity summary (chain-neutral): joined from
         # validation_results by integer batch.id. Absent until validate runs.
-        from app.models.geo_ai import ValidationResult
+        # band + explanation sourced preferentially from the anchored lab_results
+        # row (provable), falling back to the validation row.
         _val = (
             db.query(ValidationResult)
             .filter(ValidationResult.batch_id == batch.id)
             .first()
         )
+        lab_row = batch.lab_result
+        _status = (lab_row.validation_status if lab_row else None) or (
+            _val.validation_status if _val else None
+        )
+        _expl = lab_row.explanation if lab_row else None
+        _score = (
+            lab_row.authenticity_score
+            if lab_row and lab_row.authenticity_score is not None
+            else (_val.authenticity_score if _val else None)
+        )
+        _band = _authenticity_band(_status)
         authenticity = AuthenticityPublic(
-            available=_val is not None,
-            status=_val.validation_status if _val else None,
-            score=_val.authenticity_score if _val else None,
+            available=(_val is not None) or (
+                lab_row is not None and lab_row.authenticity_score is not None
+            ),
+            status=_status,
+            score=_score,
+            band=_band,
+            explanation=_expl,
+        )
+        _place = None
+        if batch.apiary_record is not None:
+            from app.services.geocode import reverse_geocode
+            _place = reverse_geocode(
+                batch.apiary_record.latitude, batch.apiary_record.longitude
+            )
+        consumer = ConsumerView(
+            place=_place,
+            authenticity_band=_band,
+            authenticity_explanation=_consumer_explanation(_status, _expl),
         )
 
         v_kwargs: dict = {}
@@ -1073,6 +1280,7 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
         verification=verification,
         tx_hashes=tx_hashes,
         authenticity=authenticity,
+        consumer=consumer,
     )
 
 
@@ -1229,4 +1437,4 @@ def create_simple_batch(
 
     _commit_or_orphan(db, batch_id_hex, harvest_tx)
     db.refresh(batch)
-    return batch
+    return build_batch_view(batch)
