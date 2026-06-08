@@ -47,6 +47,24 @@ RECEIPT_CEILING_S = 90
 RECEIPT_POLL_INITIAL_S = 1.0
 RECEIPT_POLL_MAX_S = 8.0
 
+# Gas pricing (EIP-1559). Legacy fixed-`gasPrice` txs priced at `baseFee + ~0`
+# tip got stranded and evicted on Sepolia when the base fee ticked up during
+# the 90s receipt wait (observed: role grants + a distribute tx silently
+# dropped). A type-2 tx sets a generous `maxFeePerGas` ceiling (affordability,
+# not spend — you pay base+tip) plus a real priority tip so validators include
+# it. Base fee can move +12.5%/block; ~8 blocks over the wait → ~2.6x worst
+# case, so a 3x ceiling covers it.
+GAS_MAX_FEE_MULTIPLIER = 3
+GAS_PRIORITY_FEE_GWEI = 2
+
+# Wallet funding. The maxFeePerGas ceiling raises the node's required
+# submission balance (gas_limit × maxFeePerGas). At 500k gas and a ~5 gwei
+# Sepolia ceiling that is ~0.0025 ETH per tx; a farmer's /simple does two txs
+# (create + harvest). 0.01 ETH covers the 2-tx flow with headroom; top up
+# anything below 0.005.
+DEFAULT_FUND_ETH = 0.01
+FUND_MIN_BALANCE_ETH = 0.005
+
 
 def _is_transient(exc: BaseException) -> bool:
     """Classify whether an exception should trigger a retry.
@@ -217,20 +235,39 @@ class BlockchainService:
                     raise ReceiptPendingError(tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash))
                 poll = min(poll * 2, RECEIPT_POLL_MAX_S)
 
+    def _fee_fields(self) -> dict:
+        """Build EIP-1559 fee fields with headroom for base-fee drift.
+
+        Returns `{maxFeePerGas, maxPriorityFeePerGas}` on a post-London chain
+        (Sepolia, Hardhat) so a tx survives base-fee movement across the
+        receipt wait instead of being evicted. Falls back to legacy
+        `{gasPrice}` on a pre-London chain that exposes no `baseFeePerGas`.
+
+        NOTE: callers must NOT also set `gasPrice` — web3.py rejects a tx that
+        mixes legacy and 1559 fee fields.
+        """
+        base_fee = self.w3.eth.get_block("latest").get("baseFeePerGas")
+        if base_fee is None:
+            return {"gasPrice": self.w3.eth.gas_price}
+        priority = self.w3.to_wei(GAS_PRIORITY_FEE_GWEI, "gwei")
+        max_fee = base_fee * GAS_MAX_FEE_MULTIPLIER + priority
+        return {"maxFeePerGas": max_fee, "maxPriorityFeePerGas": priority}
+
     # ------------------------------------------------------------------
     # Account funding (for dev/testnet -- new wallets start with 0 ETH)
     # ------------------------------------------------------------------
 
-    def fund_account(self, address: str, amount_eth: float = 0.001) -> Optional[str]:
+    def fund_account(self, address: str, amount_eth: float = DEFAULT_FUND_ETH) -> Optional[str]:
         """
         Send ETH from admin wallet to a user wallet so it can pay gas.
         Only needed on Hardhat/testnet where new wallets have 0 balance.
-        Default 0.001 ETH is enough for ~5 lifecycle txs on Sepolia at
-        normal gas prices; raise it if you see "insufficient funds" reverts.
+        Default DEFAULT_FUND_ETH covers a wallet's full lifecycle under the
+        EIP-1559 maxFeePerGas ceiling (including the farmer's 2-tx /simple);
+        raise it if you see "insufficient funds" reverts.
         Returns tx hash or None if funding not needed or failed.
         """
         balance = self.w3.eth.get_balance(address)
-        min_balance = self.w3.to_wei(0.0005, "ether")
+        min_balance = self.w3.to_wei(FUND_MIN_BALANCE_ETH, "ether")
         if balance >= min_balance:
             return None  # already funded
 
@@ -244,7 +281,7 @@ class BlockchainService:
                 "to": address,
                 "value": self.w3.to_wei(amount_eth, "ether"),
                 "gas": 21000,
-                "gasPrice": self.w3.eth.gas_price,
+                **self._fee_fields(),
                 "nonce": nonce,
                 "chainId": self.chain_id,
             }
@@ -293,7 +330,7 @@ class BlockchainService:
                 "nonce": nonce,
                 "chainId": self.chain_id,
                 "gas": 500_000,
-                "gasPrice": self.w3.eth.gas_price,
+                **self._fee_fields(),
             }
         )
 
