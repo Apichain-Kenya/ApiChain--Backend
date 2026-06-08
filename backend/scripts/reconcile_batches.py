@@ -82,7 +82,12 @@ def reconcile_batch(db: Session, batch_id: str) -> int:
         logger.error("Batch %s not found on chain: %s", batch_id, e)
         return 3
 
-    state_idx = batch_data["state"]
+    # get_batch() returns "state" as the string NAME and "state_code" as the
+    # int. Index STATE_NAMES with the int — using the string here raised
+    # `TypeError: '<=' not supported between 'int' and 'str'` and crashed the
+    # reconciler on every genuinely-pending batch (only ever reached on a slow
+    # network like Sepolia; Hardhat receipts return before a row goes pending).
+    state_idx = batch_data["state_code"]
     state_name = STATE_NAMES[state_idx] if 0 <= state_idx < len(STATE_NAMES) else str(state_idx)
     logger.info("On-chain state for %s: %s (idx %d)", batch_id, state_name, state_idx)
 
