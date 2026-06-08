@@ -152,3 +152,84 @@ Hardhat/DB desync rule: restarting Hardhat wipes chain+roles → ALWAYS truncate
   migration + determinism test + fresh evidence (design principle 7).
 - The merged lab panel, one-QR consumer view, animated farmer/admin timeline, analytics,
   and the ngrok phone-demo plumbing (Vite proxy + relative API + skip-header) — all shipped.
+
+---
+
+## 8. Day 1 progress (2026-06-08 EAT) — Sepolia walk + bridge tx-robustness fix
+
+Sprint 13 is now **merged to `main` on both repos** (backend PR #12 `4e3b23f`, frontend PR #5
+`09887ce`). This branch is fresh Sprint-14 work off that merged main.
+
+**What happened:** the manual Sepolia walkthrough surfaced a real (previously hidden) bridge
+bug. Two transactions were **silently dropped from the Sepolia mempool** — a processor's
+role-grant and a `distribute` tx — leaving a processor unable to sign (`recordProcessing`
+reverted "missing role") and a batch stuck `PACKAGED` with an orphan `DistributionRecord`
+(→ 409 on retry). Root cause: the bridge built **legacy fixed-`gasPrice` txs priced at
+`baseFee + ~0.001 gwei` tip**; on a live network a rising base fee strands them and the node
+evicts them. Intermittent — some txs mined, others dropped.
+
+**Fixes shipped this branch (all in `blockchain.py` + the reconcilers):**
+1. **EIP-1559 gas pricing** — `_sign_and_send` + `fund_account` now set
+   `maxFeePerGas = baseFee×3 + 2 gwei` and `maxPriorityFeePerGas = 2 gwei` (drops legacy
+   `gasPrice`; falls back to legacy on a pre-London chain). The ceiling is affordability, not
+   spend — actual cost stays ~base+tip. Constants `GAS_MAX_FEE_MULTIPLIER`, `GAS_PRIORITY_FEE_GWEI`.
+2. **Funding bump** — `fund_account` default `0.001 → 0.01 ETH` (`DEFAULT_FUND_ETH`), top-up
+   floor `0.0005 → 0.005` (`FUND_MIN_BALANCE_ETH`). REQUIRED pairing with #1: the higher
+   maxFeePerGas ceiling raises the node's submission-balance requirement above the old 0.001;
+   without this the gas fix trades dropped txs for insufficient-funds reverts. Covers the
+   farmer's 2-tx `/simple`.
+3. **Reconciler crash fix** (`reconcile_batches.py`) — used `batch_data["state"]` (the string
+   name) where it needed `["state_code"]` (the int) → `TypeError` on every genuinely-pending
+   batch. Latent because Hardhat receipts return before a row goes pending; only reachable on
+   slow Sepolia. This crash was *also* why the stuck distribute never auto-recovered.
+4. **`scripts/reconcile_roles.py`** (new) — repairs on-chain role drift: syncs the DB flag when
+   a role is live on-chain but `role_granted=False` (receipt arrived after the 90s ceiling), and
+   **re-grants** when the role is missing on-chain (dropped grant). Idempotent; `--dry-run`,
+   `--user-id`, `--no-fund`. Run it after any Sepolia enrollment that logged "Failed to grant
+   blockchain role … receipt pending".
+
+**Verification gate (all green):** pytest **76 passed / 2 skipped**; Hardhat e2e **7/7
+three-way matches** in 13.7s (gas refactor touches no anchored hash); `reconcile_roles` regrant
+path exercised live (revoke → reconcile → role restored + DB synced); `reconcile_batches`
+runs clean on a real DISTRIBUTED batch. Manual Sepolia S0→S5 confirmed working by Ian.
+
+**NOT captured:** the e2e evidence artifact (`sepolia-lifecycle-evidence.md`) was **not**
+refreshed for the Sprint-13 pre-images — the e2e run was skipped (manual walk used instead).
+The Sprint-9 evidence (batch `0x2c5c47…`, 7/7) still stands; tonight's manual walk + the gas
+fix corroborate it. If the defense wants fresh on-chain evidence on the new pre-images, run
+`python scripts/e2e_lifecycle.py` against Sepolia (~340s, now reliable post-gas-fix) and capture.
+
+---
+
+## 9. Day 2 plan (2026-06-09) — presentation-readiness
+
+**Primary: GeoAI sugar + pollen "measurable properties" coherence** (so the pending/placeholder
+sections can be finalized). Background: `reference_geoai_model_contract` + DEBUG-RUNBOOK §14.2.
+
+- **Sucrose/sugar:** measured + anchored on-chain but **excluded from the authenticity score**
+  because the model's `sucrose_level` target predicts *total sugar* (~75) not *true sucrose*
+  (~4%) — a labeling mismatch. Decision for the prototype:
+  - **(A) UI-only (recommended for tomorrow):** keep it excluded; relabel the displayed field
+    as a recorded measurement ("measured, not scored — under review"), remove any placeholder
+    text implying it gates authenticity. No model retrain (no time before the defense).
+  - **(B) Model relabel:** model-team retrains/relabels the target to true sucrose, then re-add
+    to the score. Out of scope for tomorrow; track as post-defense.
+- **Pollen density:** decoupled from the score in Sprint 13 (the prediction's pollen component
+  is region-derived, not from the entered value). UI must reflect this — entered pollen is a
+  recorded measurement, not a score input. Fix placeholder labels/tooltips that still imply it
+  drives the score.
+- **Then:** sweep the lab/scan UI sections left as placeholders for these two properties and
+  make them consistent with the Sprint-13 scoring model (moisture + HMF + triangulation +
+  confidence are the score axes; sugar + pollen are measured-but-not-scored).
+
+> Tomorrow, brainstorm A-vs-B with the team/supervisor before touching UI — it decides the
+> consumer-facing wording.
+
+**Also important (don't forget):**
+1. **Security P0a** — narrow `vite.config.js` `allowedHosts` (frontend, §3). Trivial, still open.
+2. **Docs** — fold the gas/EIP-1559 behavior + `reconcile_roles.py` into DEBUG-RUNBOOK §11 and
+   backend CLAUDE.md (impact-shield note on `blockchain.py` gas; known-issue #3 fund amount is
+   now 0.01). Future Sepolia runs need the "dropped tx → run reconcile_roles" guidance.
+3. **FE cleanup carryover** (§2 P1): ProcessorDashboard stale `PackageJarQRs` import; `BatchQR`
+   print overlay; optional `ProtectedRoute` auth guards.
+4. **Open the Sprint-14 backend PR** to `main`.
