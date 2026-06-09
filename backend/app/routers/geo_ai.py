@@ -39,9 +39,18 @@ def preview_authenticity(
         raise HTTPException(400, "Environmental data unavailable (no apiary coords)")
     db.commit()  # persist the env snapshot so submit reuses the same inputs
 
+    claimed_honey_type = None
+    if batch.metadata_record:
+       claimed_honey_type = batch.metadata_record.honey_type
+
     pred, val, explanation = _compute_authenticity(
-        batch, apiary, env, data.moisture_content, data.hmf_level, data.sucrose_level
-    )
+        batch, apiary, env,
+        data.moisture_content,
+        data.hmf_level,
+        data.sucrose_level,
+        pollen_density     = data.pollen_density,
+        claimed_honey_type = claimed_honey_type,
+)
     return LabPreviewResponse(
         predicted_moisture=pred["predicted_moisture"],
         predicted_sugar=pred["predicted_sugar"],

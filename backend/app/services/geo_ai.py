@@ -11,36 +11,22 @@ TARGETS = ["moisture_content", "sucrose_level", "hmf_level"]
 
 
 class GeoAIModelError(RuntimeError):
-    """Raised when ML artifacts are missing/incompatible. Routes catch this
-    and return HTTP 503 so a model problem degrades the geo-ai routes only,
-    instead of crashing backend boot (artifacts load lazily, not at import)."""
+    """Raised when ML artifacts are missing/incompatible."""
 
 
-# Module-level handles, populated lazily by _ensure_loaded() on first use.
 scaler = le_region = le_season = le_veg = None
 FEATURE_COLS = FLOWERING_CALENDAR = REGION_BOUNDS = None
 ZONE_CENTROIDS = TOLERANCES = THRESHOLD = ensemble_models = None
-# Max plausible distance (km) from a coord to its nearest region centroid before
-# we treat the location as outside Kenya's modelled regions. Derived at load
-# time from the regions' own spread (max pairwise centroid distance), so it
-# scales with the data instead of being a magic constant.
 _REGION_DIST_CAP = None
 _LOADED = False
 
 
 def _ensure_loaded():
-    """Load ML artifacts once, on first request. Any failure (missing file,
-    pickle/version incompatibility, feature/scaler mismatch) raises
-    GeoAIModelError rather than propagating at import time."""
     global scaler, le_region, le_season, le_veg, FEATURE_COLS
     global FLOWERING_CALENDAR, REGION_BOUNDS, ZONE_CENTROIDS, TOLERANCES, THRESHOLD
     global ensemble_models, _REGION_DIST_CAP, _LOADED
     if _LOADED:
         return
-    # SAFETY: these .pkl artifacts are first-party — the teammate's own trained
-    # models, shipped out-of-band and extracted into app/ml_models/ (gitignored),
-    # never user-supplied. joblib/pickle load of trusted local artifacts is the
-    # standard sklearn/xgboost path; no untrusted deserialization happens here.
     try:
         scaler    = joblib.load(ML_DIR / "scaler.pkl")
         le_region = joblib.load(ML_DIR / "le_region.pkl")
@@ -58,23 +44,22 @@ def _ensure_loaded():
         TOLERANCES         = _cal["TOLERANCES"]
         THRESHOLD          = _cal["THRESHOLD"]
 
-        ensemble_models = {t: joblib.load(ML_DIR / f"ensemble_{t}.pkl") for t in TARGETS}
+        ensemble_models = {
+            t: joblib.load(ML_DIR / f"ensemble_{t}.pkl") for t in TARGETS
+        }
     except Exception as e:
         raise GeoAIModelError(f"GeoAI model artifacts failed to load: {e}") from e
 
-    # Catch feature/scaler mismatches before any prediction runs.
     if len(FEATURE_COLS) != scaler.n_features_in_:
         raise GeoAIModelError(
             f"MISMATCH: feature_cols.json has {len(FEATURE_COLS)} cols "
-            f"but scaler expects {scaler.n_features_in_}. FEATURE_COLS: {FEATURE_COLS}"
+            f"but scaler expects {scaler.n_features_in_}."
         )
 
-    # Distance cap for region snapping = the regions' own max pairwise spread.
     _cents = list(ZONE_CENTROIDS.values())
     _REGION_DIST_CAP = max(
         _haversine(a[0], a[1], b[0], b[1]) for a in _cents for b in _cents
     )
-
     _LOADED = True
 
 
@@ -87,7 +72,6 @@ def _haversine(lat1, lon1, lat2, lon2):
     return R * 2 * atan2(sqrt(a), sqrt(1-a))
 
 def _nearest_region(lat, lon):
-    """Closest region centroid to a coordinate -> (region, distance_km)."""
     best, best_d = None, None
     for region, (clat, clon) in ZONE_CENTROIDS.items():
         d = _haversine(lat, lon, clat, clon)
@@ -95,18 +79,10 @@ def _nearest_region(lat, lon):
             best, best_d = region, d
     return best, best_d
 
-
 def _get_region(lat, lon):
-    # Exact bounding-box hit first.
     for region, (mn, mx, mnl, mxl) in REGION_BOUNDS.items():
         if mn <= lat <= mx and mnl <= lon <= mxl:
             return region
-    # The bounding boxes do NOT tile Kenya — real apiaries (e.g. the eastern /
-    # Ukambani belt) land in gaps between them and would otherwise be "unknown",
-    # which collapses triangulation and mis-flags legitimate honey. Snap to the
-    # nearest region centroid, unless the point is implausibly far from every
-    # modelled region (> the regions' own spread) — then it really is off-grid
-    # and "unknown" is the correct suspicion signal.
     region, dist = _nearest_region(lat, lon)
     return region if dist <= _REGION_DIST_CAP else "unknown"
 
@@ -130,11 +106,10 @@ def _triangulation(lat, lon, month, vegetation_type, pollen_density=None):
     dist_score   = max(0.0, 1.0 - dist_km / 200)
     flower_align = min(1.0, n_exp / 3.0) if n_exp > 0 else 0.1
     exp_pollen   = n_exp * 8000
-    # Decoupled: if no measured pollen is supplied, use the region-expected value
-    # so pollen consistency is neutral (1.0) and the prediction is independent of
-    # the lab pollen it will later be compared against.
+    # Prediction phase: pollen_density=None → neutral (1.0), decoupled from lab
     eff_pollen   = exp_pollen if pollen_density is None else pollen_density
-    pollen_cons  = 1.0 if eff_pollen >= exp_pollen else eff_pollen / max(exp_pollen, 1)
+    pollen_cons  = 1.0 if eff_pollen >= exp_pollen \
+                   else eff_pollen / max(exp_pollen, 1)
 
     score = flora_match*0.35 + dist_score*0.25 + flower_align*0.25 + pollen_cons*0.15
     return {
@@ -148,43 +123,99 @@ def _triangulation(lat, lon, month, vegetation_type, pollen_density=None):
     }
 
 
+def _check_honey_type_consistency(claimed_honey_type: str | None,
+                                   prediction: dict) -> tuple[bool, str]:
+    """
+    Check whether the honey type the farmer declared on the UI
+    is consistent with what the flowering calendar says should
+    be at that GPS location at harvest time.
+
+    Returns (is_consistent, note_string).
+    """
+    if not claimed_honey_type:
+        return True, ""
+
+    flowering_species = prediction.get("flowering_species", "") or ""
+    region            = prediction.get("region_detected", "") or ""
+
+    # Map UI honey_type values to pollen markers / keywords
+    # that indicate consistency
+    HONEY_TYPE_MARKERS = {
+        "acacia":      ["acacia"],
+        "eucalyptus":  ["eucalyptus"],
+        "wildflower":  [],            # wildflower is always plausible if ≥2 species
+        "sunflower":   ["sunflower"],
+        "mixed":       [],            # mixed is always plausible
+    }
+
+    claimed = claimed_honey_type.lower().strip()
+    markers = HONEY_TYPE_MARKERS.get(claimed, [])
+    n_sp    = prediction.get("n_flowering_species", 0)
+
+    if claimed in ("wildflower", "mixed"):
+        # Plausible if at least 2 species are flowering
+        consistent = n_sp >= 2
+        note = (
+            f"Claimed '{claimed}' honey consistent with "
+            f"{n_sp} flowering species at harvest time."
+            if consistent else
+            f"Claimed '{claimed}' honey — only {n_sp} species flowering "
+            f"at this location/season; monofloral origin more likely."
+        )
+    elif not markers:
+        consistent = True
+        note = f"Claimed '{claimed}' honey type — no marker conflict detected."
+    else:
+        species_str = flowering_species.lower()
+        consistent  = any(m in species_str for m in markers)
+        if consistent:
+            note = (
+                f"Claimed '{claimed}' honey consistent with flowering species "
+                f"({flowering_species}) detected at this location in harvest month."
+            )
+        else:
+            note = (
+                f"Claimed '{claimed}' honey — but {flowering_species or 'no matching species'} "
+                f"detected at this GPS location in harvest month. "
+                f"Possible mislabelling or off-season harvest."
+            )
+
+    return consistent, note
+
+
 # ── Pure compute functions (no DB, no side effects) ───────────────────────────
 
 def compute_prediction(
-    latitude: float, longitude: float, altitude: float,
-    vegetation_type: str, harvest_date: datetime,
-    temperature: float, humidity: float, rainfall: float,
+    latitude: float,
+    longitude: float,
+    altitude: float,
+    vegetation_type: str,
+    harvest_date: datetime,
+    temperature: float,
+    humidity: float,
+    rainfall: float,
     ndvi: float,
 ) -> dict:
-    """Pure prediction — NO db write, NO lab pollen. Returns predicted_* +
-    confidence + triangulation components."""
+    """
+    Pure prediction — NO db write, NO lab pollen.
+    pollen_density intentionally excluded so prediction is independent
+    of the lab result it will later be compared against.
+    """
     _ensure_loaded()
 
     month  = harvest_date.month
     season = "dry" if month in [1, 2, 6, 7, 8] else "rainy"
     region = _get_region(latitude, longitude)
 
-    # The trained encoders' vegetation vocabulary IS the 5 region labels
-    # (le_veg.classes_ == the regions), so a free-text apiary vegetation_type
-    # like "shrubland" is out-of-distribution -> encoder fallback 0 and a bogus
-    # (0,0) zone centroid. Coordinates are the only in-vocab source, so we feed
-    # the coord-derived region as the vegetation input. NOTE: this assumes the
-    # model was trained with vegetation_type == region; confirm against the
-    # teammate's training setup. See reference_geoai_model_contract (auto-memory).
+    # Snap vegetation to coord-derived region (encoders trained on region labels)
     vegetation_type = region
 
-    # pollen_density=None so prediction is independent of the lab pollen it will
-    # later be compared against (decoupled per Sprint 13 design).
     tri = _triangulation(latitude, longitude, month, vegetation_type, pollen_density=None)
 
-    # Compute sugar_boost from flowering calendar (generated, not from lab)
     flowering         = _get_flowering(latitude, longitude, month)
     sugar_boost_score = float(np.mean([f["sugar_boost"] for f in flowering])) \
                         if flowering else 0.5
 
-    # ── Build feature dict keyed by name ──────────────────────────────────────
-    # Order is determined by FEATURE_COLS loaded from feature_cols.json
-    # so adding/removing features here never silently breaks the scaler order
     feature_dict = {
         "latitude":            latitude,
         "longitude":           longitude,
@@ -204,13 +235,12 @@ def compute_prediction(
         "flowering_alignment": tri["flowering_alignment"],
     }
 
-    # Build row in the exact order the scaler was fitted on
     try:
         features = [feature_dict[col] for col in FEATURE_COLS]
     except KeyError as e:
-        raise ValueError(
+        raise GeoAIModelError(
             f"Feature {e} is in FEATURE_COLS but missing from feature_dict. "
-            f"FEATURE_COLS={FEATURE_COLS}, feature_dict keys={list(feature_dict.keys())}"
+            f"FEATURE_COLS={FEATURE_COLS}"
         )
 
     X_sc   = scaler.transform([features])
@@ -228,6 +258,9 @@ def compute_prediction(
 
     return {
         "predicted_moisture":  preds["predicted_moisture"],
+        # The model was trained on total_sugars labelled as sucrose_level.
+        # The predicted value (~75-80) represents TOTAL SUGARS, not the
+        # disaccharide sucrose (~1-5). Stored as predicted_sugar throughout.
         "predicted_sugar":     preds["predicted_sugar"],
         "predicted_hmf":       preds["predicted_hmf"],
         "confidence_score":    conf,
@@ -240,47 +273,74 @@ def compute_prediction(
     }
 
 
-def compute_validation(prediction: dict, actual_moisture: "float | None",
-                       actual_hmf: "float | None", actual_sugar=None) -> dict:
-    """Pure scoring — NO db write. Sucrose EXCLUDED from phys_match this sprint
-    (model target mislabeled); accepted only so callers can pass it without error."""
-    _ensure_loaded()
-    # prediction["predicted_moisture"] and prediction["predicted_hmf"] are required keys
-    # ([] access by design — callers must supply them); triangulation/confidence are optional (.get).
+def compute_validation(
+    prediction: dict,
+    actual_moisture: "float | None",
+    actual_hmf: "float | None",
+    actual_total_sugars: "float | None" = None,   # renamed from actual_sugar
+    actual_pollen_density: "float | None" = None,
+) -> dict:
+    """
+    Pure scoring — NO db write.
 
-    # Our lab form makes the 5 metrics optional, so any actual_* can be None.
-    # Skip absent metrics rather than treating them as deviation-from-0 (which
-    # would unfairly tank the score). If ALL metrics are absent there is no
-    # physical evidence to compare, so phys_match falls back to a neutral 0.5
-    # and the authenticity score leans on triangulation + confidence instead.
-    # Sucrose is intentionally excluded this sprint — the sucrose_level model
-    # target predicts total sugar (~75) not true sucrose (~4), so it unfairly
-    # penalises genuine honey. Sugar passes through (stored/anchored) but not scored.
+    Scoring signals:
+      - moisture_content:  scored (model trained on this correctly)
+      - hmf_level:         scored (model trained on this correctly)
+      - total_sugars:      NOW SCORED — model predicted total sugars (~75-80%),
+                           lab submits total sugars, so comparison is valid
+      - pollen_density:    scored at validation time (not prediction time)
+    """
+    _ensure_loaded()
+
     ps = []
-    for actual, pred_val, tol_key in [
-        (actual_moisture, prediction["predicted_moisture"], "moisture_content"),
-        (actual_hmf,      prediction["predicted_hmf"],      "hmf_level"),
-    ]:
-        if actual is None:
-            continue
-        dev = abs(actual - (pred_val if pred_val is not None else 0))
-        ps.append(max(0.0, 1.0 - dev / (2 * TOLERANCES[tol_key])))
+
+    # ── Moisture ──────────────────────────────────────────────────────────────
+    if actual_moisture is not None:
+        dev = abs(actual_moisture - (prediction["predicted_moisture"] or 0))
+        ps.append(max(0.0, 1.0 - dev / (2 * TOLERANCES["moisture_content"])))
+
+    # ── HMF ───────────────────────────────────────────────────────────────────
+    if actual_hmf is not None:
+        dev = abs(actual_hmf - (prediction["predicted_hmf"] or 0))
+        ps.append(max(0.0, 1.0 - dev / (2 * TOLERANCES["hmf_level"])))
+
+    # ── Total sugars (model trained on total sugars labelled sucrose_level) ───
+    # Only score if the submitted value looks like total sugars (>20%)
+    # A real sucrose-only reading would be <10% and must NOT be compared
+    # against a ~75-80% prediction — that would always flag genuine honey.
+    if actual_total_sugars is not None:
+        if actual_total_sugars > 20.0:
+            # Submitted value is total sugars — safe to score
+            dev = abs(actual_total_sugars - (prediction["predicted_sugar"] or 0))
+            ps.append(max(0.0, 1.0 - dev / (2 * TOLERANCES["sucrose_level"])))
+        # If < 20% we silently skip — likely a true sucrose reading submitted
+        # by mistake; scoring it would unfairly penalise genuine honey
+
+    # ── Pollen density (validation-time signal only) ──────────────────────────
+    if actual_pollen_density is not None:
+        n_exp      = prediction.get("n_flowering_species", 0)
+        exp_pollen = n_exp * 8000
+        p_score    = 1.0 if actual_pollen_density >= exp_pollen \
+                     else actual_pollen_density / max(exp_pollen, 1)
+        ps.append(p_score)
 
     mean_phys = float(np.mean(ps)) if ps else 0.5
-    tri = prediction.get("triangulation_score")
-    tri = 0.5 if tri is None else tri
-    conf = prediction.get("confidence_score")
-    conf = 0.5 if conf is None else conf
-    auth      = round(float(np.clip(mean_phys*0.50 + tri*0.35 + conf*0.15, 0, 1)), 4)
-    status    = "verified"   if auth >= 0.80 else \
-                "suspicious" if auth >= THRESHOLD else "flagged"
+    tri  = prediction.get("triangulation_score") or 0.5
+    conf = prediction.get("confidence_score")    or 0.5
+    auth = round(float(np.clip(
+        mean_phys * 0.50 + tri * 0.35 + conf * 0.15, 0, 1
+    )), 4)
+
+    status = "verified"   if auth >= 0.80 else \
+             "suspicious" if auth >= THRESHOLD else "flagged"
+
     return {
-        "authenticity_score": auth,
-        "is_valid":           auth >= THRESHOLD,
-        "validation_status":  status,
-        "phys_match_score":   round(mean_phys, 4),
+        "authenticity_score":  auth,
+        "is_valid":            auth >= THRESHOLD,
+        "validation_status":   status,
+        "phys_match_score":    round(mean_phys, 4),
         "triangulation_score": round(tri, 4),
-        "confidence_score":   round(conf, 4),
+        "confidence_score":    round(conf, 4),
     }
 
 
@@ -289,25 +349,65 @@ def build_explanation(
     validation: dict,
     actual_moisture,
     actual_hmf,
+    actual_total_sugars=None,
+    actual_pollen_density=None,
+    claimed_honey_type=None,
 ) -> str:
-    """Deterministic, offline, English rule-based explanation. Anchored on chain
-    as a proof artifact (English is fine — the consumer view localizes the BAND,
-    not this prose). Built only from rounded components, so re-running it server-
-    side at submit reproduces the exact string hashed."""
+    """Deterministic English explanation anchored on chain."""
     region   = prediction.get("region_detected") or "unknown"
     tri      = prediction.get("triangulation_score") or 0.0
     tri_word = "strong" if tri >= 0.7 else "moderate" if tri >= 0.4 else "weak"
     pm       = prediction.get("predicted_moisture")
     ph       = prediction.get("predicted_hmf")
+    ps_pred  = prediction.get("predicted_sugar")
+    n_sp     = prediction.get("n_flowering_species", 0)
+    species  = prediction.get("flowering_species", "") or "none identified"
     status   = validation.get("validation_status", "flagged")
-    am       = "n/a" if actual_moisture is None else actual_moisture
-    ah       = "n/a" if actual_hmf is None else actual_hmf
+
+    am  = "n/a" if actual_moisture     is None else actual_moisture
+    ah  = "n/a" if actual_hmf          is None else actual_hmf
+    ats = "n/a" if actual_total_sugars is None else actual_total_sugars
+
+    # Pollen note
+    pollen_note = ""
+    if actual_pollen_density is not None:
+        exp_pollen = n_sp * 8000
+        if actual_pollen_density >= exp_pollen:
+            pollen_note = (
+                f"Pollen density {int(actual_pollen_density)}/mL consistent "
+                f"with {n_sp} flowering species. "
+            )
+        else:
+            pollen_note = (
+                f"Pollen density {int(actual_pollen_density)}/mL below expected "
+                f"{exp_pollen}/mL for {n_sp} flowering species — "
+                f"possible dilution or off-season harvest. "
+            )
+
+    # Sugar note
+    sugar_note = ""
+    if actual_total_sugars is not None:
+        if actual_total_sugars > 20.0:
+            sugar_note = (
+                f"Total sugars {ats}% vs expected {ps_pred}%. "
+            )
+        else:
+            sugar_note = (
+                f"Sucrose-only reading ({ats}%) submitted — "
+                f"total sugars not scored (submit total sugars for full scoring). "
+            )
+
+    # Honey type note
+    _, honey_type_note = _check_honey_type_consistency(claimed_honey_type, prediction)
+
     return (
         f"Origin region detected: {region}. "
-        f"Moisture {am} vs expected {pm}; HMF {ah} vs expected {ph}. "
-        f"{tri_word.capitalize()} origin triangulation ({round(tri*100)}%). "
-        f"Sugar measured but not scored (model target under review). "
+        f"Flowering species at harvest time: {species}. "
+        f"Moisture {am}% vs expected {pm}%; "
+        f"HMF {ah} mg/kg vs expected {ph} mg/kg. "
+        f"{sugar_note}"
+        f"{pollen_note}"
+        f"{honey_type_note + ' ' if honey_type_note else ''}"
+        f"{tri_word.capitalize()} origin triangulation ({round(tri * 100)}%). "
         f"Verdict: {status}."
     )
-
-

@@ -150,6 +150,30 @@ def create_farmer(
         "blockchain": role_result,
     }
 
+
+
+def fetch_altitude(lat, lon):
+    urls = [
+        f"https://api.open-elevation.com/api/v1/lookup?locations={lat},{lon}",
+        f"https://api.opentopodata.org/v1/srtm90m?locations={lat},{lon}"
+    ]
+
+    for url in urls:
+        try:
+            res = requests.get(url, timeout=5)
+            data = res.json()
+
+            results = data.get("results")
+            if results:
+                elev = results[0].get("elevation")
+                if elev is not None:
+                    return elev
+        except Exception as e:
+            logger.warning(f"Elevation fetch failed from {url}: {e}")
+            continue
+
+    return None
+
 @router.post("/farm-details/{farmer_id}")
 def add_farm_details(
     farmer_id: int,
@@ -166,6 +190,11 @@ def add_farm_details(
 
     latitude = data.latitude
     longitude = data.longitude
+
+# treat 0,0 as "missing coordinates"
+    if latitude == 0 and longitude == 0:
+       latitude = None
+       longitude = None
 
     # ---------------------------
     # GEOCODING
@@ -213,12 +242,7 @@ def add_farm_details(
         # ALTITUDE
         altitude = None
         try:
-            elev_res = requests.get(
-                f"https://api.open-elevation.com/api/v1/lookup?locations={latitude},{longitude}",
-                timeout=5
-            )
-            elev_data = elev_res.json()
-            altitude = elev_data.get("results", [{}])[0].get("elevation")
+            altitude = fetch_altitude(latitude, longitude)
         except Exception as e:
             logger.warning(f"Altitude fetch failed: {e}")
 
