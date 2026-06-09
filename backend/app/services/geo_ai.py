@@ -325,8 +325,14 @@ def compute_validation(
         ps.append(p_score)
 
     mean_phys = float(np.mean(ps)) if ps else 0.5
-    tri  = prediction.get("triangulation_score") or 0.5
-    conf = prediction.get("confidence_score")    or 0.5
+    # None → neutral 0.5, but a genuine 0.0 must stay 0.0. A `... or 0.5` here is
+    # a truthiness trap: it silently rescues a zero-triangulation / zero-confidence
+    # batch (a totally inconsistent origin) up to 0.5, masking the fraud signal.
+    # Guarded by test_geoai_compute::test_zero_triangulation_not_treated_as_missing.
+    tri = prediction.get("triangulation_score")
+    tri = 0.5 if tri is None else tri
+    conf = prediction.get("confidence_score")
+    conf = 0.5 if conf is None else conf
     auth = round(float(np.clip(
         mean_phys * 0.50 + tri * 0.35 + conf * 0.15, 0, 1
     )), 4)
