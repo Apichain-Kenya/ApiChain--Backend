@@ -235,12 +235,169 @@ def create_employee(
 
 @router.get("/")
 def get_all_users(
-    current_user: dict = Depends(require_roles(["super_admin"])),
+    current_user: dict = Depends(require_roles(["super_admin", "admin"])),
     db: Session = Depends(get_db),
 ):
-    """Get all employees only"""
     users = db.query(User).all()
     return users
+
+@router.get("/all-users-with-farmers")
+def get_all_users_including_farmers(
+    current_user: dict = Depends(require_roles(["super_admin", "admin"])),
+    db: Session = Depends(get_db),
+):
+    from app.models.farmer import Farmer
+    from datetime import datetime
+    
+    employees = db.query(User).all()
+    farmers = db.query(Farmer).all()
+    
+    all_users = []
+    
+    for emp in employees:
+        created_at = getattr(emp, 'created_at', None)
+        if created_at is None:
+            created_at = datetime.utcnow()
+        
+        all_users.append({
+            "id": emp.id,
+            "user_type": "employee",
+            "first_name": emp.first_name,
+            "last_name": emp.last_name,
+            "username": emp.username,
+            "email": emp.email,
+            "phone": emp.phone,
+            "role": emp.role,
+            "is_active": emp.is_active,
+            "created_by": emp.created_by,
+            "created_at": created_at.isoformat() if hasattr(created_at, 'isoformat') else created_at,
+        })
+    
+    for farmer in farmers:
+        created_at = getattr(farmer, 'created_at', None)
+        if created_at is None:
+            created_at = datetime.utcnow()
+        
+        farmer_dict = {
+            "id": farmer.id,
+            "user_type": "farmer",
+            "first_name": farmer.first_name,
+            "last_name": farmer.last_name,
+            "username": farmer.username if farmer.username else farmer.phone,
+            "phone": farmer.phone,
+            "role": "farmer",
+            "is_active": True,
+            "created_at": created_at.isoformat() if hasattr(created_at, 'isoformat') else created_at,
+        }
+        if hasattr(farmer, 'email') and farmer.email:
+            farmer_dict["email"] = farmer.email
+        if hasattr(farmer, 'onboarded_by'):
+            farmer_dict["created_by"] = farmer.onboarded_by
+        
+        all_users.append(farmer_dict)
+    
+    all_users.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+    
+    return all_users
+
+@router.get("/{user_id}")
+def get_user(
+    user_id: int,
+    current_user: dict = Depends(require_roles(["super_admin", "admin"])),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return user
+
+@router.put("/{user_id}")
+def update_user(
+    user_id: int,
+    user_update: UserUpdate,
+    current_user: dict = Depends(require_roles(["super_admin", "admin"])),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user.id == current_user["user_id"] and user_update.role and user_update.role != user.role:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot change your own role"
+        )
+    
+    update_data = user_update.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(user, field, value)
+    
+    db.commit()
+    db.refresh(user)
+    return user
+
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(
+    user_id: int,
+    current_user: dict = Depends(require_roles(["super_admin", "admin"])),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user.id == current_user["user_id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete your own account"
+        )
+    
+    if user.role == "super_admin":
+        super_admin_count = db.query(User).filter(User.role == "super_admin").count()
+        if super_admin_count <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot delete the last super admin"
+            )
+    
+    db.delete(user)
+    db.commit()
+    return None
+
+@router.patch("/{user_id}/toggle-status")
+def toggle_user_status(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(require_roles(["super_admin", "admin"])),
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if user.id == current_user["user_id"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot deactivate your own account"
+        )
+    
+    if user.role == "super_admin":
+        super_admin_count = db.query(User).filter(User.role == "super_admin").count()
+        if super_admin_count <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot deactivate the last super admin"
+            )
+    
+    user.is_active = not user.is_active
+    db.commit()
+    db.refresh(user)
+    
+    return {
+        "id": user.id,
+        "is_active": user.is_active,
+        "message": f"User {'activated' if user.is_active else 'deactivated'} successfully"
+    }
 
 @router.get("/all-users-with-farmers")
 def get_all_users_including_farmers(

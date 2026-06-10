@@ -1137,40 +1137,48 @@ def get_batch_hashes(batch_id: str):
 
     return BatchHashesResponse(batch_id=batch_id, **hashes)
 
-
 @router.get("/{batch_id}/verify", response_model=BatchVerifyResponse)
 def verify_batch(batch_id: str, db: Session = Depends(get_db)):
-    """Public batch verification endpoint (for QR scan).
-
-    No authentication required. Reads on-chain state and joins the persisted
-    `lab_results` and `environmental_data` rows when present. When a lab row
-    exists, also returns a three-way hash comparison: recomputed pre-image hash
-    of the persisted row vs. `lab_results.lab_proof_hash` vs. on-chain
-    `getBatch().labProofHash`. The scan UI shows the green "Blockchain
-    Verified" badge only when state == DISTRIBUTED and `verification.lab.match`
-    is true.
-    """
     _check_blockchain()
 
-    batch_id_bytes = _batch_id_to_bytes(batch_id)
+    batch_record = None
+    blockchain_id_for_chain = None
+
+    if batch_id.isdigit():
+        batch_record = db.query(HoneyBatch).filter(
+            HoneyBatch.id == int(batch_id)
+        ).first()
+        if batch_record:
+            blockchain_id_for_chain = batch_record.blockchain_batch_id
+    else:
+        clean_id = batch_id[2:] if batch_id.startswith('0x') else batch_id
+        batch_record = db.query(HoneyBatch).filter(
+            HoneyBatch.blockchain_batch_id == clean_id
+        ).first()
+        if not batch_record:
+            batch_record = db.query(HoneyBatch).filter(
+                HoneyBatch.blockchain_batch_id == f"0x{clean_id}"
+            ).first()
+        if batch_record:
+            blockchain_id_for_chain = batch_record.blockchain_batch_id
+
+    if not batch_record or not blockchain_id_for_chain:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    if blockchain_id_for_chain.startswith('0x'):
+        blockchain_id_for_chain = blockchain_id_for_chain[2:]
+
+    try:
+        batch_id_bytes = bytes.fromhex(blockchain_id_for_chain)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid blockchain ID format")
 
     try:
         batch_data = blockchain_service.get_batch(batch_id_bytes)
         timeline = blockchain_service.get_batch_timeline(batch_id_bytes)
         hashes = blockchain_service.get_batch_hashes(batch_id_bytes)
-    except (ContractLogicError, BadFunctionCallOutput) as e:
-        raise HTTPException(
-            status_code=404,
-            detail=(
-                "Batch not found on chain. The batch may not exist, or the "
-                "blockchain node is not synced / the contract is not deployed "
-                "at the configured address (Hardhat/DB desync)."
-            ),
-        )
-
-    batch = db.query(HoneyBatch).filter(
-        HoneyBatch.blockchain_batch_id == batch_id
-    ).first()
+    except (ContractLogicError, BadFunctionCallOutput):
+        raise HTTPException(status_code=404, detail="Batch not found on chain")
 
     lab_public: LabResultPublic | None = None
     apiary_public: ApiaryRecordPublic | None = None
@@ -1185,26 +1193,22 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
     authenticity: AuthenticityPublic | None = None
     consumer: ConsumerView | None = None
 
-    if batch is not None:
+    if batch_record is not None:
         tx_hashes = TxHashes(
-            create_tx=batch.create_tx_hash,
-            harvest_tx=batch.harvest_tx_hash,
-            process_tx=batch.process_tx_hash,
-            lab_tx=batch.lab_verify_tx_hash,
-            package_tx=batch.packaging_tx_hash,
-            distribute_tx=batch.distribution_tx_hash,
+            create_tx=batch_record.create_tx_hash,
+            harvest_tx=batch_record.harvest_tx_hash,
+            process_tx=batch_record.process_tx_hash,
+            lab_tx=batch_record.lab_verify_tx_hash,
+            package_tx=batch_record.packaging_tx_hash,
+            distribute_tx=batch_record.distribution_tx_hash,
         )
 
-        # GeoAI authenticity summary (chain-neutral): joined from
-        # validation_results by integer batch.id. Absent until validate runs.
-        # band + explanation sourced preferentially from the anchored lab_results
-        # row (provable), falling back to the validation row.
         _val = (
             db.query(ValidationResult)
-            .filter(ValidationResult.batch_id == batch.id)
+            .filter(ValidationResult.batch_id == batch_record.id)
             .first()
         )
-        lab_row = batch.lab_result
+        lab_row = batch_record.lab_result
         _status = (lab_row.validation_status if lab_row else None) or (
             _val.validation_status if _val else None
         )
@@ -1225,10 +1229,10 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
             explanation=_expl,
         )
         _place = None
-        if batch.apiary_record is not None:
+        if batch_record.apiary_record is not None:
             from app.services.geocode import reverse_geocode
             _place = reverse_geocode(
-                batch.apiary_record.latitude, batch.apiary_record.longitude
+                batch_record.apiary_record.latitude, batch_record.apiary_record.longitude
             )
         consumer = ConsumerView(
             place=_place,
@@ -1238,56 +1242,53 @@ def verify_batch(batch_id: str, db: Session = Depends(get_db)):
 
         v_kwargs: dict = {}
 
-        if batch.apiary_record is not None:
-            apiary_public = ApiaryRecordPublic.model_validate(batch.apiary_record)
+        if batch_record.apiary_record is not None:
+            apiary_public = ApiaryRecordPublic.model_validate(batch_record.apiary_record)
             v_kwargs["apiary"] = StageHashVerification(
-                **_verify_apiary_hash(batch.apiary_record, hashes["apiary_hash"])
+                **_verify_apiary_hash(batch_record.apiary_record, hashes["apiary_hash"])
             )
 
-        if batch.metadata_record is not None:
-            metadata_public = BatchMetadataPublic.model_validate(batch.metadata_record)
-            # The contract's getBatchHashes() view returns 6 fields (no
-            # metadata); the metadata hash lives in the wider getBatch() tuple,
-            # already in `batch_data` above.
+        if batch_record.metadata_record is not None:
+            metadata_public = BatchMetadataPublic.model_validate(batch_record.metadata_record)
             v_kwargs["metadata"] = StageHashVerification(
-                **_verify_metadata_hash(batch.metadata_record, batch_data["metadata_hash"])
+                **_verify_metadata_hash(batch_record.metadata_record, batch_data["metadata_hash"])
             )
 
-        if batch.harvest_record is not None:
-            harvest_public = HarvestRecordPublic.model_validate(batch.harvest_record)
+        if batch_record.harvest_record is not None:
+            harvest_public = HarvestRecordPublic.model_validate(batch_record.harvest_record)
             v_kwargs["harvest"] = StageHashVerification(
-                **_verify_harvest_hash(batch.harvest_record, hashes["harvest_hash"])
+                **_verify_harvest_hash(batch_record.harvest_record, hashes["harvest_hash"])
             )
 
-        if batch.process_record is not None:
-            process_public = ProcessRecordPublic.model_validate(batch.process_record)
+        if batch_record.process_record is not None:
+            process_public = ProcessRecordPublic.model_validate(batch_record.process_record)
             v_kwargs["process"] = StageHashVerification(
-                **_verify_process_hash(batch.process_record, hashes["process_hash"])
+                **_verify_process_hash(batch_record.process_record, hashes["process_hash"])
             )
 
-        if batch.lab_result is not None:
-            lab_public = LabResultPublic.model_validate(batch.lab_result)
+        if batch_record.lab_result is not None:
+            lab_public = LabResultPublic.model_validate(batch_record.lab_result)
             v_kwargs["lab"] = StageHashVerification(
-                **_verify_lab_hash(batch.lab_result, hashes["lab_proof_hash"])
+                **_verify_lab_hash(batch_record.lab_result, hashes["lab_proof_hash"])
             )
 
-        if batch.packaging_record is not None:
-            packaging_public = PackagingRecordPublic.model_validate(batch.packaging_record)
+        if batch_record.packaging_record is not None:
+            packaging_public = PackagingRecordPublic.model_validate(batch_record.packaging_record)
             v_kwargs["packaging"] = StageHashVerification(
-                **_verify_packaging_hash(batch.packaging_record, hashes["packaging_hash"])
+                **_verify_packaging_hash(batch_record.packaging_record, hashes["packaging_hash"])
             )
 
-        if batch.distribution_record is not None:
-            distribution_public = DistributionRecordPublic.model_validate(batch.distribution_record)
+        if batch_record.distribution_record is not None:
+            distribution_public = DistributionRecordPublic.model_validate(batch_record.distribution_record)
             v_kwargs["distribution"] = StageHashVerification(
-                **_verify_distribution_hash(batch.distribution_record, hashes["distribution_hash"])
+                **_verify_distribution_hash(batch_record.distribution_record, hashes["distribution_hash"])
             )
 
         if v_kwargs:
             verification = VerificationBlock(**v_kwargs)
 
-        if batch.environmental_data is not None:
-            env_public = EnvironmentalDataPublic.model_validate(batch.environmental_data)
+        if batch_record.environmental_data is not None:
+            env_public = EnvironmentalDataPublic.model_validate(batch_record.environmental_data)
 
     return BatchVerifyResponse(
         batch_id=batch_id,
